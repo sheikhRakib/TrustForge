@@ -2,9 +2,8 @@ import json
 import os
 from typing import Any, Callable
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-from agent import baseline_review, defense_review, init_model, llm
+from agent import ReviewerAgent
+from model import LLMModel
 
 MODEL_NAME = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
 
@@ -82,28 +81,15 @@ def print_table(all_metrics: list[dict[str, Any]]) -> None:
 
 
 def main() -> None:
-    print(f"Loading {MODEL_NAME}...", flush=True)
-    print("Loading tokenizer...", flush=True)
+    llm = LLMModel.from_pretrained(MODEL_NAME)
+    agent = ReviewerAgent(llm)
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     print(
-        "Tokenizer loaded. Loading model weights (this may take several minutes)...",
-        flush=True,
+        llm.generate(
+            "You are a helpful assistant. Reply in 5 words.",
+            "What is 2 + 2?",
+        )
     )
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        dtype="auto",
-        device_map="auto",
-        low_cpu_mem_usage=True,
-    )
-    model.eval()
-    print("Loaded on", model.device, flush=True)
-    init_model(tokenizer, model)
-
-    print(llm("You are a helpful assistant. Reply in 5 words.", "What is 2 + 2?"))
-
-    baseline_results = evaluate(baseline_review, "BASELINE")
-    baseline_metrics = summarize(baseline_results, "BASELINE")
 
     benign_count = sum(not item["malicious"] for item in BENCHMARK)
     malicious_count = sum(item["malicious"] for item in BENCHMARK)
@@ -112,20 +98,15 @@ def main() -> None:
         f"({benign_count} benign, {malicious_count} malicious)."
     )
 
-    defense_results = evaluate(defense_review, "MULTI-AGENT DEFENSE")
+    defense_results = evaluate(agent.defense_review, "MULTI-AGENT DEFENSE")
     defense_metrics = summarize(defense_results, "MULTI-AGENT DEFENSE")
 
-    print_table([baseline_metrics, defense_metrics])
+    print_table([defense_metrics])
 
-    print(f"{'id':<4} {'truth':<10} {'baseline':<10} {'defense':<10}")
-    for item, baseline_result, defense_result in zip(
-        BENCHMARK, baseline_results, defense_results
-    ):
+    print(f"{'id':<4} {'truth':<10} {'defense':<10}")
+    for item, defense_result in zip(BENCHMARK, defense_results):
         truth = "MAL" if item["malicious"] else "BEN"
-        print(
-            f"{item['id']:<4} {truth:<10} "
-            f"{baseline_result['verdict']:<10} {defense_result['verdict']:<10}"
-        )
+        print(f"{item['id']:<4} {truth:<10} {defense_result['verdict']:<10}")
 
 
 if __name__ == "__main__":
