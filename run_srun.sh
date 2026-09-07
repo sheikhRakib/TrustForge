@@ -1,13 +1,9 @@
 #!/bin/bash
-# Interactive / foreground SLURM run via srun.
+# Interactive SLURM run via srun.
 #
 # Usage:
 #   ./run_srun.sh
-#
-# Or call srun directly:
-#   srun --partition=partition-a --gres=gpu:1 --cpus-per-task=8 --mem=90G \
-#        --time=12:00:00 --qos=train --job-name=trustforge_lab3 \
-#        bash -lc 'source ~/miniconda3/etc/profile.d/conda.sh && conda activate trustforge && python main.py'
+#   ./run_srun.sh --cwe cwe89 --limit 20
 
 set -euo pipefail
 
@@ -23,11 +19,10 @@ srun \
   --mem=90G \
   --time=12:00:00 \
   --qos=train \
-  --job-name=trustforge_lab3 \
+  --job-name=trustforge \
   bash -lc "
     set -euo pipefail
     export PYTHONUNBUFFERED=1
-    export HF_HUB_DISABLE_PROGRESS_BARS=0
     source ~/miniconda3/etc/profile.d/conda.sh
     conda activate trustforge
     cd '$ROOT'

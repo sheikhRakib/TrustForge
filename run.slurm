@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=trustforge_lab3
+#SBATCH --job-name=trustforge
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --partition=partition-a
@@ -11,9 +11,7 @@
 #
 # Submit:
 #   sbatch run.slurm
-#
-# Optional args:
-#   sbatch --export=ALL,EXTRA_ARGS="--some-flag" run.slurm
+#   sbatch --export=ALL,EXTRA_ARGS="--cwe cwe89 --limit 20" run.slurm
 
 set -euo pipefail
 
@@ -22,7 +20,6 @@ echo "SLURM_JOB_ID=${SLURM_JOB_ID:-unset}"
 echo "EXTRA_ARGS=${EXTRA_ARGS:-}"
 
 export PYTHONUNBUFFERED=1
-export HF_HUB_DISABLE_PROGRESS_BARS=0
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate trustforge

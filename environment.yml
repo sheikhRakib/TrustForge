@@ -11,3 +11,5 @@ dependencies:
       - accelerate>=1.0.0
       - safetensors>=0.4.0
       - huggingface-hub>=0.26.0
+      - datasets>=2.20.0
+      - requests>=2.32.0
