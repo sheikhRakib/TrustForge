@@ -14,23 +14,15 @@
 #   sbatch --export=ALL,EXTRA_ARGS="--cwe cwe89 --limit 20" run.slurm
 
 set -euo pipefail
-
-echo "Job started on $(hostname) at $(date)"
-echo "SLURM_JOB_ID=${SLURM_JOB_ID:-unset}"
-echo "EXTRA_ARGS=${EXTRA_ARGS:-}"
-
-export PYTHONUNBUFFERED=1
-
-source ~/miniconda3/etc/profile.d/conda.sh
-conda activate trustforge
-
 cd "${SLURM_SUBMIT_DIR:-.}"
 mkdir -p logs
+echo "Job started on $(hostname) at $(date); job=${SLURM_JOB_ID:-local}"
 
-echo "Python: $(python -V)"
-echo "Which python: $(which python)"
-echo "Working dir: $(pwd)"
+export PYTHONUNBUFFERED=1
+source "${TRUSTFORGE_CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
+conda activate trustforge
 
-python -u main.py ${EXTRA_ARGS:-}
-
+# Positional arguments preserve spaces safely; legacy EXTRA_ARGS supports simple words.
+read -r -a extra_args <<< "${EXTRA_ARGS:-}"
+python -u main.py "${extra_args[@]}" "$@"
 echo "Job finished at $(date)"

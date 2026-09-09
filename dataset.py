@@ -80,7 +80,12 @@ def example_from_sevra(
         "vuln_id": vuln_id,
         "failed_by": list(row.get("failed_by") or []),
         "enriched": bool(row.get("enriched") or files or row.get("diff")),
-        "source": "sevra",
+        "source": row.get("source", "sevra"),
+        "variant": row.get("variant", "original"),
+        "parent_id": row.get("parent_id"),
+        "repository_files": row.get("repository_files", {}),
+        "head_commit": row.get("head_commit"),
+        "head_branch": row.get("head_branch"),
     }
 
 
@@ -131,9 +136,7 @@ def load_hf_split(cwe: str, *, malicious: bool) -> list[dict[str, Any]]:
     from datasets import load_dataset
 
     cwe = _normalize_cwe_name(cwe)
-    config = (
-        f"{cwe}-{DEFAULT_MALICIOUS_VERSION}" if malicious else f"{cwe}-benign"
-    )
+    config = f"{cwe}-{DEFAULT_MALICIOUS_VERSION}" if malicious else f"{cwe}-benign"
     split = "malicious" if malicious else "benign"
     dataset = load_dataset(HF_DATASET, config, split=split)
     return [dict(row) for row in dataset]
@@ -165,9 +168,7 @@ def _load_enriched(
         mal_path = cwe_dir / "malicious.jsonl"
         if mal_path.exists():
             for row in iter_jsonl(mal_path):
-                example = example_from_sevra(
-                    row, malicious=True, cwe_dir=cwe_dir.name
-                )
+                example = example_from_sevra(row, malicious=True, cwe_dir=cwe_dir.name)
                 if hard_split_only and not example.get("failed_by"):
                     continue
                 if require_code and not (example["files"] or example["diff"]):
@@ -258,57 +259,34 @@ def load_benchmark(
         incomplete = [
             item["id"]
             for item in examples
-            if not ((item.get("diff") or "").strip() and (item.get("pr_title") or "").strip())
+            if not (
+                (item.get("diff") or "").strip()
+                and (item.get("pr_title") or "").strip()
+            )
         ]
         if incomplete:
             preview = ", ".join(incomplete[:5])
             more = f" (+{len(incomplete) - 5} more)" if len(incomplete) > 5 else ""
             raise ValueError(
-                "Benchmark examples missing title and/or diff: "
-                f"{preview}{more}"
+                f"Benchmark examples missing title and/or diff: {preview}{more}"
             )
 
     return examples
 
 
 def format_pr_for_review(example: dict[str, Any]) -> str:
-    """Render a PR-shaped example as text for LLM agents.
-
-    Always includes metadata (title, body, paths) and a unified diff.
-    Raises if either side is missing so evals cannot silently go metadata-only.
-    """
-    title = (example.get("pr_title") or "").strip()
-    body = (example.get("pr_body") or "").strip()
-    diff = (example.get("diff") or "").strip()
-    files_changed = list(example.get("files_changed") or [])
-    files = dict(example.get("files") or {})
-
-    missing: list[str] = []
-    if not title:
-        missing.append("pr_title")
-    if not body:
-        missing.append("pr_body")
-    if not diff:
-        missing.append("diff")
+    """Full PR narrative and diff; token-aware chunking happens at the model boundary."""
+    required = ("pr_title", "pr_body", "diff")
+    missing = [field for field in required if not (example.get(field) or "").strip()]
     if missing:
         raise ValueError(
-            f"Example {example.get('id')!r} missing required fields for review: "
-            f"{', '.join(missing)}. Run `python -m harness.offline_enrich --cwe <cwe>` "
-            "and ensure data/SEVRA_enriched is loaded."
+            f"Example {example.get('id')!r} missing {missing}; enrich from local SEVRA images"
         )
-
-    parts = [
-        f"### Pull Request Title\n{title}",
-        f"### Pull Request Description\n{body}",
-        "### Files Changed\n"
-        + ("\n".join(f"- {path}" for path in files_changed) or "(none listed)"),
-        f"### Unified Diff\n```diff\n{diff}\n```",
-    ]
-
-    if files:
-        file_blocks = [
-            f"#### {path}\n```\n{content}\n```" for path, content in files.items()
+    return "\n\n".join(
+        [
+            "### Pull Request Title\n" + example["pr_title"],
+            "### Pull Request Description\n" + example["pr_body"],
+            "### Files Changed\n" + "\n".join(example.get("files_changed") or []),
+            "### Unified Diff\n```diff\n" + example["diff"] + "\n```",
         ]
-        parts.append("### File Contents (PR head)\n" + "\n\n".join(file_blocks))
-
-    return "\n\n".join(parts)
+    )

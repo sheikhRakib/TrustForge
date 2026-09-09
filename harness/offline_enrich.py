@@ -1,8 +1,7 @@
 """Offline SEVRA enrichment from local Gitea image tars (no running server).
 
-Works around rootless Podman without /etc/subuid by mounting the image
-filesystem via `podman unshare`, copying gitea.db + bare repos, then
-reconstructing unified diffs with git.
+Requires working Podman image mounting via `podman unshare`; copies the Gitea
+database and bare repositories, then reconstructs unified diffs with git.
 
 Example:
   python -m harness.offline_enrich --cwe cwe89 --limit 20
@@ -60,6 +59,16 @@ def parse_args() -> argparse.Namespace:
         "--force-extract",
         action="store_true",
         help="Re-copy image data even if extract dir already exists",
+    )
+    parser.add_argument(
+        "--include-repository-source",
+        action="store_true",
+        help="Include unchanged Python files from the PR head for import resolution",
+    )
+    parser.add_argument(
+        "--force-output",
+        action="store_true",
+        help="Explicitly replace existing enriched splits",
     )
     return parser.parse_args()
 
@@ -182,9 +191,7 @@ def _resolve_git_repo(repos_root: Path, owner: str, name: str) -> Path:
         for path in owner_dir.iterdir():
             if path.name.lower() == wanted:
                 return path
-    raise FileNotFoundError(
-        f"Missing bare repo for {owner}/{name} under {repos_root}"
-    )
+    raise FileNotFoundError(f"Missing bare repo for {owner}/{name} under {repos_root}")
 
 
 def _sanitize_text(value: str) -> str:
@@ -194,8 +201,6 @@ def _sanitize_text(value: str) -> str:
         o = ord(ch)
         if 0xD800 <= o <= 0xDFFF:
             out.append("\ufffd")
-        elif ch in "\u2028\u2029":
-            out.append(" ")
         else:
             out.append(ch)
     return "".join(out)
@@ -211,15 +216,13 @@ def _sanitize_obj(obj):
     return obj
 
 
-MAX_FILE_BYTES = 200_000
-
-
 def fetch_pr_offline(
     *,
     db: sqlite3.Connection,
     repos_root: Path,
     repo: str,
     pr_number: int,
+    include_repository_source: bool = False,
 ) -> dict:
     if "/" not in repo:
         raise ValueError(f"Expected owner/name repo, got {repo!r}")
@@ -264,18 +267,22 @@ def fetch_pr_offline(
         except subprocess.CalledProcessError:
             continue
         content = _sanitize_text(content)
-        if len(content.encode("utf-8", errors="replace")) > MAX_FILE_BYTES:
-            files[path] = (
-                content[:MAX_FILE_BYTES]
-                + f"\n\n/* truncated: original ~{len(content)} chars; see unified diff */\n"
-            )
-        else:
-            files[path] = content
+        files[path] = content
+
+    repository_files = {}
+    if include_repository_source:
+        for path in _git(gitrepo, "ls-tree", "-r", "--name-only", head).splitlines():
+            if path.endswith((".py", ".pyi")) and path not in files:
+                repository_files[path] = _sanitize_text(
+                    _git(gitrepo, "show", f"{head}:{path}")
+                )
 
     return {
         "pr_title": _sanitize_text(row["title"] or ""),
         "pr_body": _sanitize_text(row["body"] or ""),
         "head_branch": head_branch,
+        "head_commit": head,
+        "repository_files": repository_files,
         "diff": diff,
         "files_changed": paths,
         "files": files,
@@ -289,6 +296,7 @@ def _enrich_rows(
     cwe: str,
     extract_dir: Path,
     out_path: Path,
+    include_repository_source: bool = False,
 ) -> int:
     if not rows:
         print(f"No rows for {out_path}")
@@ -300,7 +308,8 @@ def _enrich_rows(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
 
-    with out_path.open("w", encoding="utf-8") as handle:
+    temp_path = out_path.with_suffix(".jsonl.tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
         for index, row in enumerate(rows, start=1):
             repo = row["repo"]
             pr_number = int(row["pr_number"])
@@ -311,6 +320,7 @@ def _enrich_rows(
                     repos_root=repos_root,
                     repo=repo,
                     pr_number=pr_number,
+                    include_repository_source=include_repository_source,
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"  ERROR: {exc}")
@@ -333,17 +343,18 @@ def _enrich_rows(
             example["diff"] = bundle.get("diff") or ""
             example["files"] = bundle.get("files") or {}
             example["head_branch"] = bundle.get("head_branch")
+            example["head_commit"] = bundle.get("head_commit")
+            example["repository_files"] = bundle.get("repository_files", {})
             example["enriched"] = True
             example["enrich_mode"] = "offline"
             if bundle.get("error"):
                 example["enrich_error"] = bundle["error"]
 
-            handle.write(
-                json.dumps(_sanitize_obj(example), ensure_ascii=False) + "\n"
-            )
+            handle.write(json.dumps(_sanitize_obj(example), ensure_ascii=False) + "\n")
             written += 1
 
     db.close()
+    temp_path.replace(out_path)
     print(f"Wrote {written} → {out_path}")
     return written
 
@@ -352,6 +363,13 @@ def main() -> None:
     args = parse_args()
     cwe = args.cwe.lower().replace("-", "")
 
+    targets = [args.out_root / cwe / "malicious.jsonl"]
+    if not args.skip_benign:
+        targets.append(args.out_root / cwe / "benign.jsonl")
+    if not args.force_output and any(p.exists() for p in targets):
+        raise SystemExit(
+            "Enriched output already exists; choose --out-root or explicitly pass --force-output"
+        )
     print(f"Loading malicious metadata for {cwe}...")
     malicious_rows = load_hf_split(cwe, malicious=True)
     if args.hard_split:
@@ -361,15 +379,14 @@ def main() -> None:
 
     mal_image = MALICIOUS_IMAGE.format(cwe=cwe, version=args.malicious_version)
     mal_extract = args.extract_root / f"{cwe}-malicious"
-    extract_image_data(
-        image=mal_image, dest=mal_extract, force=args.force_extract
-    )
+    extract_image_data(image=mal_image, dest=mal_extract, force=args.force_extract)
     _enrich_rows(
         rows=malicious_rows,
         malicious=True,
         cwe=cwe,
         extract_dir=mal_extract,
         out_path=args.out_root / cwe / "malicious.jsonl",
+        include_repository_source=args.include_repository_source,
     )
     if not args.keep_extract:
         shutil.rmtree(mal_extract, ignore_errors=True)
@@ -384,20 +401,15 @@ def main() -> None:
 
     ben_image = BENIGN_IMAGE.format(version=args.benign_version)
     ben_extract = args.extract_root / "benign-shared"
-    extract_image_data(
-        image=ben_image, dest=ben_extract, force=args.force_extract
-    )
+    extract_image_data(image=ben_image, dest=ben_extract, force=args.force_extract)
     _enrich_rows(
         rows=benign_rows,
         malicious=False,
         cwe=cwe,
         extract_dir=ben_extract,
         out_path=args.out_root / cwe / "benign.jsonl",
+        include_repository_source=args.include_repository_source,
     )
-    # Keep shared benign extract for other CWEs unless user wants cleanup.
-    if not args.keep_extract and args.limit is not None:
-        # Limited runs: leave benign extract; full multi-CWE runs can reuse it.
-        pass
 
 
 if __name__ == "__main__":

@@ -5,11 +5,13 @@ dependencies:
   - python=3.12
   - pip
   - pip:
-      - --extra-index-url https://download.pytorch.org/whl/cu124
-      - torch>=2.5.0
-      - transformers>=4.51.0
-      - accelerate>=1.0.0
+      - torch==2.13.0
+      - transformers==5.16.1
+      - accelerate==1.14.0
       - safetensors>=0.4.0
       - huggingface-hub>=0.26.0
       - datasets>=2.20.0
-      - requests>=2.32.0
+      - tree-sitter-language-pack==0.10.0
+      - tree-sitter==0.26.0
+      - z3-solver==4.15.4.0
+      - matplotlib==3.10.7

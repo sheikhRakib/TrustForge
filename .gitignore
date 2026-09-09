@@ -1,6 +1,11 @@
 __pycache__/
+.ruff_cache/
 logs/
 data/SEVRA/
 data/SEVRA_images/
 data/SEVRA_enriched/
 data/SEVRA_extract/
+data/SEVRA_repaired.jsonl
+data/SEVRA_repaired.provenance.json
+data/variants-*.jsonl
+data/semantic-fixtures.jsonl

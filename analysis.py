@@ -1,76 +1,13 @@
-"""Compiler / heuristic program-analysis lane (injection-immune).
-
-Lane B combines:
-  1. Python AST analysis (sinks, taint, light symbolic, cross-file)
-  2. Diff-aware, multi-language heuristics over the unified PR diff
-     (removed sanitizers / weakened bounds / introduced sinks)
-
-NL narrative is never trusted — only code and diff hunks.
-"""
+"""Deterministic, bounded Python semantics and multilingual diff heuristics."""
 
 from __future__ import annotations
-
-import ast
 import re
-import textwrap
+import threading
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from source_tools import strip_source, LANGUAGES
+from semantic import PythonAnalyzer
 
-
-def normalize_source(source: str) -> str:
-    """Dedent a source snippet for AST parsing."""
-    return textwrap.dedent(source.replace("\t", "    ")).strip() + "\n"
-
-
-def strip_comments_and_docstrings(source: str) -> str:
-    """Return source with docstrings and comments removed."""
-    source = normalize_source(source)
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return "\n".join(re.sub(r"#.*$", "", line) for line in source.splitlines())
-
-    for node in ast.walk(tree):
-        if isinstance(
-            node,
-            (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module),
-        ):
-            body = getattr(node, "body", [])
-            if (
-                body
-                and isinstance(body[0], ast.Expr)
-                and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)
-            ):
-                node.body = body[1:] if len(body) > 1 else [ast.Pass()]
-
-    return ast.unparse(tree)
-
-
-DANGEROUS_SINKS = {
-    "eval",
-    "exec",
-    "compile",
-    "system",
-    "popen",
-    "execute",
-    "loads",
-    "__import__",
-}
-
-TAINT_SOURCES = {
-    "input",
-    "getenv",
-    "get",
-    "post",
-    "form",
-    "args",
-    "readline",
-    "read",
-    "recv",
-    "chat",
-    "generate",
-}
+_SEMANTIC_LOCK = threading.Lock()
 
 
 @dataclass
@@ -79,190 +16,44 @@ class Finding:
     path: str
     line: int | None
     detail: str
+    witness: dict | None = None
 
 
 @dataclass
 class AnalysisReport:
     findings: list[Finding] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     @property
-    def has_blocking_issue(self) -> bool:
-        # Hard blocks come from diff-aware multi-lang signals.
-        blocking = {
-            "diff_sink",
-            "diff_csrf_removed",
-            "diff_authz_removed",
-        }
-        return any(finding.kind in blocking for finding in self.findings)
+    def has_advisory_issue(self):
+        return any(
+            f.kind
+            in {
+                "taint",
+                "symbolic",
+                "diff_sink",
+                "diff_csrf_removed",
+                "diff_authz_removed",
+                "diff_sanitizer_removed",
+                "diff_bounds_weakened",
+            }
+            for f in self.findings
+        )
 
-    @property
-    def has_advisory_issue(self) -> bool:
-        advisory = {
-            "diff_sanitizer_removed",
-            "diff_bounds_weakened",
-            "sink",
-            "taint",
-            "symbolic",
-            "cross_file",
-        }
-        return any(finding.kind in advisory for finding in self.findings)
+    def to_dict(self):
+        from dataclasses import asdict
 
-    def to_dict(self) -> dict[str, Any]:
         return {
-            "blocking": self.has_blocking_issue,
-            "findings": [
-                {
-                    "kind": finding.kind,
-                    "path": finding.path,
-                    "line": finding.line,
-                    "detail": finding.detail,
-                }
-                for finding in self.findings
-            ],
+            "advisory": self.has_advisory_issue,
+            "findings": [asdict(f) for f in self.findings],
+            "warnings": self.warnings,
         }
-
-
-def _call_name(node: ast.Call) -> str | None:
-    func = node.func
-    if isinstance(func, ast.Name):
-        return func.id
-    if isinstance(func, ast.Attribute):
-        return func.attr
-    return None
-
-
-def find_risky_sinks(source: str, path: str = "<string>") -> list[Finding]:
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return []
-
-    findings: list[Finding] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            name = _call_name(node)
-            if name in DANGEROUS_SINKS:
-                findings.append(
-                    Finding(
-                        kind="sink",
-                        path=path,
-                        line=getattr(node, "lineno", None),
-                        detail=f"dangerous call `{name}()`",
-                    )
-                )
-    return findings
-
-
-def find_taint_flows(source: str, path: str = "<string>") -> list[Finding]:
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return []
-
-    tainted: set[str] = set()
-    findings: list[Finding] = []
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
-            name = _call_name(node.value)
-            if name in TAINT_SOURCES:
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        tainted.add(target.id)
-
-        if isinstance(node, ast.Call):
-            sink = _call_name(node)
-            if sink in DANGEROUS_SINKS:
-                for arg in node.args:
-                    if isinstance(arg, ast.Name) and arg.id in tainted:
-                        findings.append(
-                            Finding(
-                                kind="taint",
-                                path=path,
-                                line=getattr(node, "lineno", None),
-                                detail=f"tainted `{arg.id}` reaches `{sink}()`",
-                            )
-                        )
-    return findings
-
-
-def find_symbolic_reachability(source: str, path: str = "<string>") -> list[Finding]:
-    """Lightweight symbolic note: sinks under always-true / unconstrained guards."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return []
-
-    findings: list[Finding] = []
-
-    class Visitor(ast.NodeVisitor):
-        def visit_If(self, node: ast.If) -> None:
-            always_true = isinstance(node.test, ast.Constant) and bool(node.test.value)
-            for child in ast.walk(node):
-                if isinstance(child, ast.Call):
-                    name = _call_name(child)
-                    if name in DANGEROUS_SINKS and always_true:
-                        findings.append(
-                            Finding(
-                                kind="symbolic",
-                                path=path,
-                                line=getattr(child, "lineno", None),
-                                detail=(
-                                    f"`{name}()` reachable under always-true guard"
-                                ),
-                            )
-                        )
-            self.generic_visit(node)
-
-    Visitor().visit(tree)
-    return findings
-
-
-def resolve_cross_file_symbols(
-    files: dict[str, str],
-) -> list[Finding]:
-    """Flag sinks whose callee is defined in another changed file."""
-    definitions: dict[str, str] = {}
-    for path, source in files.items():
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                definitions[node.name] = path
-
-    findings: list[Finding] = []
-    for path, source in files.items():
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            name = _call_name(node)
-            if name in definitions and definitions[name] != path:
-                remote = files[definitions[name]]
-                sink_pattern = r"\b(" + "|".join(sorted(DANGEROUS_SINKS)) + r")\b"
-                if re.search(sink_pattern, remote):
-                    findings.append(
-                        Finding(
-                            kind="cross_file",
-                            path=path,
-                            line=getattr(node, "lineno", None),
-                            detail=(
-                                f"call `{name}()` resolves to {definitions[name]} "
-                                "which contains dangerous sinks"
-                            ),
-                        )
-                    )
-    return findings
 
 
 # ---------------------------------------------------------------------------
 # Diff-aware multi-language heuristics
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class DiffHunkFile:
@@ -403,22 +194,11 @@ _ADDED_SINK_RULES: list[tuple[str, set[str] | None, re.Pattern[str], str]] = [
         "diff_sink",
         {"89"},
         re.compile(
-            r"(SELECT|INSERT|UPDATE|DELETE|WHERE).{0,80}(\+|'\s*\.|\"\s*\+|"
-            r"\$\w+|%\s*\(|\.format\s*\(|f[\"'])",
+            r"(?:\.\s*(?:execute|executemany|query)|mysqli_query|pg_query)"
+            r"\s*\([^;\n]*(?:\+|\.format\s*\(|\s\.\s)",
             re.I,
         ),
-        "SQL keyword concatenated / interpolated with untrusted-looking data",
-    ),
-    (
-        "diff_sink",
-        {"89"},
-        re.compile(
-            r"`[^`]*\$\w+[^`]*`\s*(?:BETWEEN|LIKE|=|<|>)|"
-            r"'\s*\.\s*\$\w+\s*\.\s*'|"
-            r"\"\s*\+\s*\w+\s*\+\s*\"",
-            re.I,
-        ),
-        "identifier/value spliced into SQL via string concat",
+        "SQL API argument constructed with concatenation / formatting",
     ),
     (
         "diff_sink",
@@ -496,11 +276,6 @@ _ADDED_SINK_RULES: list[tuple[str, set[str] | None, re.Pattern[str], str]] = [
     ),
 ]
 
-_BOUNDS_WEAKEN = re.compile(
-    r"if\s*\([^)]*(?:\|\||&&)?[^)]*(?:>=?|<=?)\s*(?:NR_\w+|SIZE|\w+_MAX|sizeof)",
-    re.I,
-)
-
 
 def _rule_applies(cwes: set[str] | None, target: str | None) -> bool:
     if cwes is None or target is None:
@@ -534,7 +309,43 @@ def analyze_diff(
         findings.append(Finding(kind=kind, path=path, line=line, detail=detail))
 
     for file in parse_unified_diff(diff):
-        removed_text = "\n".join(text for _, text in file.removed)
+        from pathlib import Path
+
+        if Path(file.path).suffix.lower() not in LANGUAGES:
+            continue
+        # Reconstruct hunk-side text including context before syntax stripping.
+        # This preserves multiline comments within each available patch hunk.
+        sides = {"old": [], "new": []}
+        active = False
+        for raw in diff.splitlines():
+            if raw.startswith("+++ "):
+                active = raw[4:].removeprefix("b/").strip() == file.path
+            elif raw.startswith("diff --git "):
+                active = False
+            elif active and not raw.startswith(("@@", "\\")):
+                if raw.startswith("-"):
+                    sides["old"].append(raw[1:])
+                elif raw.startswith("+"):
+                    sides["new"].append(raw[1:])
+                elif raw.startswith(" "):
+                    sides["old"].append(raw[1:])
+                    sides["new"].append(raw[1:])
+        maps = {}
+        for side in ("old", "new"):
+            raw_lines = sides[side]
+            cleaned, _ = strip_source(
+                "\n".join(raw_lines), file.path, mask_literal_text=True
+            )
+            maps[side] = {}
+            for raw, clean in zip(raw_lines, cleaned.split("\n")):
+                # Keep duplicates conservative: only inspect text surviving stripping.
+                maps[side].setdefault(raw, []).append(clean)
+        file.removed = [
+            (ln, next(iter(maps["old"].get(t, [""])), "")) for ln, t in file.removed
+        ]
+        file.added = [
+            (ln, next(iter(maps["new"].get(t, [""])), "")) for ln, t in file.added
+        ]
         added_text = "\n".join(text for _, text in file.added)
 
         for kind, cwes, pattern, detail in _REMOVED_SANITIZER_RULES:
@@ -573,14 +384,15 @@ def analyze_diff(
                 added_ifs = [t for _, t in file.added if re.search(r"\bif\s*\(", t)]
                 if not added_ifs:
                     continue
-                if tokens and any(
-                    any(tok in a for tok in tokens) for a in added_ifs
-                ):
+                if tokens and any(any(tok in a for tok in tokens) for a in added_ifs):
                     continue
                 # Weaker: added condition text shorter / fewer conjuncts.
-                if any(len(a) < len(text) or a.count("&&") + a.count("||") < (
-                    text.count("&&") + text.count("||")
-                ) for a in added_ifs):
+                if any(
+                    len(a) < len(text)
+                    or a.count("&&") + a.count("||")
+                    < (text.count("&&") + text.count("||"))
+                    for a in added_ifs
+                ):
                     add(
                         "diff_bounds_weakened",
                         file.path,
@@ -606,7 +418,9 @@ def analyze_diff(
 
         if target in {None, "352"}:
             for ln, text in file.removed:
-                if re.search(r"protect_from_forgery|csrf_protect|verify_csrf", text, re.I):
+                if re.search(
+                    r"protect_from_forgery|csrf_protect|verify_csrf", text, re.I
+                ):
                     if not re.search(
                         r"protect_from_forgery|csrf_protect|verify_csrf",
                         added_text,
@@ -623,31 +437,22 @@ def analyze_diff(
 
 
 class ProgramAnalyzer:
-    """Lane B: deterministic analysis over PR file contents and unified diff."""
+    """Analyze supplied source context; unsupported semantics are explicit."""
 
-    def analyze(
-        self,
-        files: dict[str, str] | None = None,
-        *,
-        diff: str | None = None,
-        cwe_id: str | None = None,
-    ) -> AnalysisReport:
-        report = AnalysisReport()
+    def analyze(self, files=None, *, diff=None, cwe_id=None, disabled=()):
         files = files or {}
-
-        if files:
-            py_files = {
-                path: normalize_source(source)
-                for path, source in files.items()
-                if path.endswith((".py", ".pyi"))
-            }
-            for path, source in py_files.items():
-                report.findings.extend(find_risky_sinks(source, path))
-                report.findings.extend(find_taint_flows(source, path))
-                report.findings.extend(find_symbolic_reachability(source, path))
-            report.findings.extend(resolve_cross_file_symbols(py_files))
-
-        if diff:
-            report.findings.extend(analyze_diff(diff, cwe_id=cwe_id))
-
+        report = AnalysisReport()
+        # Z3 default contexts are not thread-safe for concurrent analysis.
+        with _SEMANTIC_LOCK:
+            findings, warnings = PythonAnalyzer(files, disabled=disabled).run()
+        report.findings = [Finding(**f) for f in findings if f["kind"] not in disabled]
+        report.warnings = warnings
+        non_python = [p for p in files if not p.endswith((".py", ".pyi"))]
+        if non_python:
+            report.warnings.append(
+                f"{len(non_python)} non-Python files: semantic taint/symbolic/import analysis unavailable"
+            )
+        if diff and "diff" not in disabled:
+            # Never condition the defense on the benchmark's ground-truth CWE.
+            report.findings.extend(analyze_diff(diff))
         return report
