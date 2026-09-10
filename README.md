@@ -30,23 +30,25 @@ conda env update -f environment.yml
 python main.py --dry-run
 
 # Small, deterministically balanced sample on this Slurm cluster:
-sbatch run.slurm --limit 4 --output logs/smoke.jsonl
+sbatch run.slurm --limit 4 --output output/smoke.jsonl
 
 # All three systems on the full existing dataset:
-sbatch run.slurm --output logs/full.jsonl
+sbatch run.slurm --output output/full.jsonl
 ```
 
 The launchers request two GPUs, 90 GB host RAM, and 12 hours. A full run may need
 more than one allocation. Resubmit the **same command** to resume completed
 example/mode records. Use a new output path after changing code, data, model,
 options, or ablations: the manifest rejects incompatible resumptions.
-Create `logs/` before submitting on a fresh clone because Slurm opens its log
-files before starting the script.
+`logs/` is reserved for Slurm stdout/stderr and GPU telemetry. Model responses,
+manifests, summaries, reports, and figures belong under `output/`. Create `logs/`
+before submitting on a fresh clone because Slurm opens its log files before the
+script starts.
 
 For an interactive allocation:
 
 ```bash
-./run_srun.sh --limit 4 --output logs/interactive.jsonl
+./run_srun.sh --limit 4 --output output/interactive.jsonl
 ```
 
 On an already allocated GPU node, use `python main.py` with the same arguments.
@@ -69,7 +71,7 @@ Adjust the partition, QoS, GPU count, and memory in the launchers for other site
 | `--disable stripping,grounding` | Component ablations; see below |
 | `--output PATH` | Append-only results with automatic compatible resume |
 
-For an output `logs/full.jsonl`, the runner writes:
+For an output `output/full.jsonl`, the runner writes:
 
 - `full.jsonl`: verdicts, reasons, diagnostics, labels, per-call token counts,
   incremental and attributed elapsed time, shared inference costs, OOM retries,
@@ -86,7 +88,7 @@ benign controls, FPR measures the attempted denial of approval. These are decisi
 metrics; a low ASR alone does not establish useful review quality.
 
 ```bash
-python report.py logs/full.jsonl --output-dir logs/full-report
+python report.py output/full.jsonl --output-dir output/full-report
 ```
 
 This exports metrics CSV, report completion status, and SVG ASR figures by variant,
@@ -95,9 +97,6 @@ or older manifests whose expected count cannot be verified. For diagnostic
 reports only, add `--allow-partial`; their figures are labeled partial/unverified.
 Completion means all selected examples and modes finished, not necessarily the
 full SEVRA dataset (a completed smoke test is still a smoke test).
-The historical `logs/trustforge_2976.out` and
-`logs/replay_2976_49152.jsonl` were produced by earlier code; they are preserved
-for comparison only.
 
 ## What is implemented
 
@@ -198,13 +197,13 @@ python augment.py --split test --output data/variants-test.jsonl
 # Explicitly separate controlled homoglyph-identifier and cross-file fixtures:
 python augment.py --fixtures-only --output data/semantic-fixtures.jsonl
 
-sbatch run.slurm --benchmark data/variants-test.jsonl --output logs/variants-test.jsonl
-sbatch run.slurm --benchmark data/semantic-fixtures.jsonl --output logs/semantic-fixtures.jsonl
+sbatch run.slurm --benchmark data/variants-test.jsonl --output output/variants-test.jsonl
+sbatch run.slurm --benchmark data/semantic-fixtures.jsonl --output output/semantic-fixtures.jsonl
 
 # Same dataset/sample seed, separate output for each ablation:
-sbatch run.slurm --disable stripping --output logs/no-stripping.jsonl
-sbatch run.slurm --disable grounding --output logs/no-grounding.jsonl
-sbatch run.slurm --disable symbolic --output logs/no-symbolic.jsonl
+sbatch run.slurm --disable stripping --output output/no-stripping.jsonl
+sbatch run.slurm --disable grounding --output output/no-grounding.jsonl
+sbatch run.slurm --disable symbolic --output output/no-symbolic.jsonl
 ```
 
 Narrative variants add authority, role-hijack, Base64, and hex instructions while
@@ -214,8 +213,9 @@ Homoglyph/cross-file fixtures are synthetic Python examples, **not** transformed
 SEVRA vulnerabilities. The paper must distinguish this scope from a claim of
 SEVRA-wide semantics-preserving code obfuscation. Ablation names are `scanner`,
 `injection`, `stripping`, `grounding`, `taint`, `symbolic`, `cross_file`, and `diff`.
-Semantic-finding ablations suppress that evidence class in aggregation; they do
-not claim independent removal of shared interpreter machinery. The code and
+`symbolic` disables constraint solving and witnesses while retaining taint;
+`taint` disables taint and its dependent symbolic witnesses while retaining the
+structural sink inventory. Both retain the shared AST traversal. The code and
 reporting tools do not establish paper results until the corresponding runs finish.
 This repository performs inference/evaluation; it does not train or fine-tune the
 reviewer. The train/test names refer to robustness-template development and testing.

@@ -98,6 +98,15 @@ class PythonAnalyzer:
                     self.functions[f"{module}.{node.name}"] = (module, node)
             self.imports[module] = aliases
 
+    @property
+    def taint_enabled(self):
+        return "taint" not in self.disabled
+
+    @property
+    def symbolic_enabled(self):
+        # Symbolic witnesses are defined only for tainted source-to-sink paths.
+        return self.taint_enabled and "symbolic" not in self.disabled
+
     def name(self, node, module, env):
         if isinstance(node, ast.Name):
             if node.id in env:
@@ -113,10 +122,14 @@ class PythonAnalyzer:
         return "<dynamic>"
 
     def fresh(self, node, module, integer=False):
+        if not self.taint_enabled:
+            return Value()
         self.input_counter += 1
         key = f"{module}:line{node.lineno}:input{self.input_counter}"
-        expr = z3.Int(key) if integer else z3.String(key)
-        self.inputs[str(expr)] = expr
+        expr = None
+        if self.symbolic_enabled:
+            expr = z3.Int(key) if integer else z3.String(key)
+            self.inputs[str(expr)] = expr
         return Value(expr, True)
 
     def eval(self, node, env, module, conditions, depth):
@@ -177,7 +190,7 @@ class PythonAnalyzer:
                         witness=None,
                     )
                 )
-                if taint:
+                if taint and self.taint_enabled:
                     self.findings.append(
                         dict(
                             kind="taint",
@@ -187,7 +200,7 @@ class PythonAnalyzer:
                             witness=None,
                         )
                     )
-                    if conditions is not None and all(
+                    if self.symbolic_enabled and conditions is not None and all(
                         not a.tainted or a.expr is not None for a in sink_args
                     ):
                         solver = z3.Solver()
@@ -392,7 +405,7 @@ class PythonAnalyzer:
                             solver.add(*bc)
                             if solver.check() == z3.unsat:
                                 continue
-                        else:
+                        elif self.symbolic_enabled:
                             self.warnings.add(
                                 f"{module}:{node.lineno}: unmodeled branch guard"
                             )
@@ -411,6 +424,7 @@ class PythonAnalyzer:
         return states
 
     def run(self):
+        initial_conditions = [] if self.symbolic_enabled else None
         for module, (path, tree) in self.modules.items():
             top_level_functions = {
                 id(node)
@@ -442,7 +456,7 @@ class PythonAnalyzer:
                                 witness=None,
                             )
                         )
-            self.walk(tree.body, {}, module, [])
+            self.walk(tree.body, {}, module, initial_conditions)
             for node in tree.body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     # A standalone entry point's `request` parameter follows the
@@ -460,6 +474,6 @@ class PythonAnalyzer:
                         self.warnings.add(
                             f"{path}:{node.lineno}: standalone parameter 'request' assumed to be an HTTP request"
                         )
-                    self.walk(node.body, env, module, [])
+                    self.walk(node.body, env, module, initial_conditions)
         unique = {repr(f): f for f in self.findings}
         return list(unique.values()), sorted(self.warnings)

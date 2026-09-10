@@ -15,6 +15,8 @@ from agent import ReviewerAgent, parse_verdict_line
 from dataset import load_benchmark, format_pr_for_review, iter_jsonl
 
 MODEL_NAME = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+DEFAULT_OUTPUT = Path("output/evaluation.jsonl")
+SLURM_LOG_DIR = Path(__file__).resolve().parent / "logs"
 MODES = ("baseline", "multi_agent", "hybrid", "analysis_only")
 DISABLE = (
     "scanner",
@@ -26,6 +28,11 @@ DISABLE = (
     "cross_file",
     "diff",
 )
+
+
+def is_slurm_log_path(path):
+    """Return whether an artifact path would be written inside repo-local logs/."""
+    return path.resolve().is_relative_to(SLURM_LOG_DIR.resolve())
 
 
 def _score_example(item, response):
@@ -91,7 +98,7 @@ def parse_args():
     )
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-input-tokens", type=int, default=8192)
-    p.add_argument("--output", type=Path, default=Path("logs/evaluation.jsonl"))
+    p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     p.add_argument(
         "--dry-run",
         action="store_true",
@@ -106,6 +113,8 @@ def parse_args():
         p.error("Unknown ablation component")
     if a.max_input_tokens < 512 or (a.limit is not None and a.limit < 1):
         p.error("Invalid token budget/limit")
+    if is_slurm_log_path(a.output):
+        p.error("logs/ is reserved for Slurm/runtime logs; use output/ for results")
     return a
 
 

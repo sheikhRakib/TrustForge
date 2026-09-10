@@ -1,6 +1,7 @@
 __pycache__/
 .ruff_cache/
 logs/
+output/
 data/SEVRA/
 data/SEVRA_images/
 data/SEVRA_enriched/

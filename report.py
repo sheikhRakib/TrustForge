@@ -5,8 +5,10 @@ import csv
 import json
 import re
 from pathlib import Path
-from main import summarize
+from main import is_slurm_log_path, summarize
 from dataset import iter_jsonl
+
+DEFAULT_REPORT_DIR = Path("output/report")
 
 
 def load_results(path, *, allow_partial=False):
@@ -36,9 +38,11 @@ def load_results(path, *, allow_partial=False):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("results", type=Path)
-    p.add_argument("--output-dir", type=Path, default=Path("logs/report"))
+    p.add_argument("--output-dir", type=Path, default=DEFAULT_REPORT_DIR)
     p.add_argument("--allow-partial", action="store_true")
     a = p.parse_args()
+    if is_slurm_log_path(a.output_dir):
+        p.error("logs/ is reserved for Slurm/runtime logs; use output/ for reports")
     try:
         rows, complete = load_results(a.results, allow_partial=a.allow_partial)
     except ValueError as exc:
