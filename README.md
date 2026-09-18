@@ -3,8 +3,8 @@
 TrustForge evaluates defenses against prompt injection in pull-request review.
 It compares a single-model reviewer, role-separated reviewers, and a hybrid with
 program analysis. The current default model is
-`Qwen/Qwen3-Coder-30B-A3B-Instruct`; the supplied paper names Qwen2.5, so update
-that model description when reporting these runs.
+`Qwen/Qwen2.5-3B-Instruct` (matches the paper's Qwen2.5 family). Report the
+exact Hugging Face ID; results are not comparable to earlier 30B coder runs.
 
 ## Start with the data already downloaded
 
@@ -36,14 +36,14 @@ sbatch run.slurm --limit 4 --output output/smoke.jsonl
 sbatch run.slurm --output output/full.jsonl
 ```
 
-The launchers request two GPUs, 90 GB host RAM, and 12 hours. A full run may need
-more than one allocation. Resubmit the **same command** to resume completed
-example/mode records. Use a new output path after changing code, data, model,
-options, or ablations: the manifest rejects incompatible resumptions.
-`logs/` is reserved for Slurm stdout/stderr and GPU telemetry. Model responses,
-manifests, summaries, reports, and figures belong under `output/`. Create `logs/`
-before submitting on a fresh clone because Slurm opens its log files before the
-script starts.
+The launchers request one GPU, 32 GB host RAM, and 12 hours (enough for the
+default 3B model). A full run may need more than one allocation. Resubmit the
+**same command** to resume completed example/mode records. Use a new output path
+after changing code, data, model, options, or ablations: the manifest rejects
+incompatible resumptions. `logs/` is reserved for Slurm stdout/stderr and GPU
+telemetry. Model responses, manifests, summaries, reports, and figures belong
+under `output/`. Create `logs/` before submitting on a fresh clone because Slurm
+opens its log files before the script starts.
 
 For an interactive allocation:
 
@@ -66,7 +66,7 @@ Adjust the partition, QoS, GPU count, and memory in the launchers for other site
 | `--limit N --seed 42` | Deterministic sampling balanced across labels when available |
 | `--modes baseline,multi_agent,hybrid` | Choose systems; `analysis_only` is also supported without a GPU |
 | `--benchmark PATH` | Evaluate an explicit enriched/augmented JSONL; requires PR metadata/diff; absent head files cause auditor abstention |
-| `--max-input-tokens 8192` | Per-call input budget; also reserves output space in the model context |
+| `--max-input-tokens 32768` | Per-call input budget; also reserves output space in the model context |
 | `--model ID` | Hugging Face model override; model must support the configured SDPA attention backend |
 | `--disable stripping,grounding` | Component ablations; see below |
 | `--output PATH` | Append-only results with automatic compatible resume |
@@ -122,6 +122,11 @@ full SEVRA dataset (a completed smoke test is still a smoke test).
   functions, loops, dynamic dispatch, complex objects, and unsupported expressions
   are reported as coverage limits.
   Witnesses describe a modeled reachable sink, not proof of exploitability.
+- Multilingual sink/taint heuristics (tree-sitter) cover PHP, JavaScript/TypeScript,
+  C/C++, Go, Java, Ruby, and Rust: known dangerous calls are inventoried, and
+  advisory ``taint`` findings fire when a known source and sink co-occur in the
+  same function or when a high-risk sink (eval/system/exec-style) appears.
+  These are heuristics, not symbolic proofs.
 - Multilingual diff rules identify potential changes to sinks and protection
   code. Syntax comments and literal text are masked before matching; executable
   string interpolation is retained. SQL diff rules inspect API argument
@@ -132,19 +137,22 @@ full SEVRA dataset (a completed smoke test is still a smoke test).
   approved code. Safe approvals do not require a nonexistent vulnerability
   citation. Missing head files (including deletion-only PRs) and malformed auditor decisions remain UNKNOWN.
 
-There is no claim of complete, injection-immune verification: semantic analysis
-is bounded and Python-specific, and other languages currently have syntax
-stripping and diff heuristics. Parser errors and unsupported syntax are exposed
-in diagnostics. Imported modules absent from the supplied context cannot be
-resolved. Coverage warnings are diagnostic: they do not automatically override
-an auditor approval. `analysis_only` returns UNKNOWN when it has no advisory finding;
-absence of a finding is not treated as a clean-code proof.
+There is no claim of complete, injection-immune verification: full symbolic and
+import-aware analysis remains Python-specific; other supported languages use
+sink/taint heuristics plus syntax stripping and diff rules. Parser errors and
+unsupported syntax are exposed in diagnostics. Imported modules absent from the
+supplied context cannot be resolved. Coverage warnings are diagnostic: they do
+not automatically override an auditor approval. `analysis_only` returns UNKNOWN
+when it has no advisory finding; absence of a finding is not treated as a
+clean-code proof.
 
 ## Input coverage and GPU performance
 
-The model's default input budget is **8,192 tokens**. The previous 49,152-token
-full run exhausted memory on two A100 40 GB GPUs. Oversized content is reviewed
-in chunks; system instructions and chat formatting are kept for every call.
+The model's default input budget is **32,768 tokens**, matching the Qwen2.5-3B
+context window. Earlier 30B runs used 8,192 because a 49,152-token budget
+exhausted memory on two A100 40 GB GPUs; the smaller 3B model makes the full
+window practical. Oversized content is still reviewed in chunks when it exceeds
+the budget; system instructions and chat formatting are kept for every call.
 PR narrative/diff prompts no longer silently discard their tails. Auditor
 chunks include source coordinates and cover all supplied changed-file contents.
 Extremely long lines may cross chunk boundaries, limiting evidence citation
@@ -183,8 +191,9 @@ inherit another example's reduction. Exhausted retries stop the run and leave
 the failed result pending; no partial review is scored as complete.
 
 OOM is a per-call memory issue: reducing `--limit` does not make a long prompt
-fit. Lower `--max-input-tokens` to create smaller chunks, use a smaller model,
-or request more GPU memory.
+fit. Lower `--max-input-tokens` to create smaller chunks, or request more GPU
+memory. Larger models may need a lower default budget and more GPUs than the
+current 3B launchers.
 
 ## Robustness variants and ablations
 
@@ -270,6 +279,6 @@ bash -n run.slurm run_srun.sh monitor_gpus.sh
 
 Tests cover source stripping, literal-text false positives, SQL parameterization,
 request-source assumptions, grounding, taint, satisfiable/unsatisfiable paths,
-import resolution, label-independent analysis, invalid verdict scoring,
-augmentation preservation, chunk coverage, OOM recovery, report completion checks,
-and reuse and timing of agent calls.
+import resolution, multilingual sink/taint heuristics, label-independent analysis,
+invalid verdict scoring, augmentation preservation, chunk coverage, OOM recovery,
+report completion checks, and reuse and timing of agent calls.

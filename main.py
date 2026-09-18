@@ -14,7 +14,10 @@ import time
 from agent import ReviewerAgent, parse_verdict_line
 from dataset import load_benchmark, format_pr_for_review, iter_jsonl
 
-MODEL_NAME = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
+# Qwen2.5-3B context is 32k; keep the full window as the default input budget.
+# Larger 30B runs previously needed 8,192 to avoid OOM on two A100 40 GB GPUs.
+DEFAULT_MAX_INPUT_TOKENS = 32_768
 DEFAULT_OUTPUT = Path("output/evaluation.jsonl")
 SLURM_LOG_DIR = Path(__file__).resolve().parent / "logs"
 MODES = ("baseline", "multi_agent", "hybrid", "analysis_only")
@@ -97,7 +100,7 @@ def parse_args():
         help="Deterministic sample, balanced across labels when possible",
     )
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--max-input-tokens", type=int, default=8192)
+    p.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
     p.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     p.add_argument(
         "--dry-run",

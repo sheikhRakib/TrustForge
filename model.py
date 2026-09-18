@@ -32,7 +32,7 @@ class LLMModel:
         self.tokenizer = tokenizer
         self.model = model
         self.device_label = device_label
-        self.max_input_tokens = 8_192
+        self.max_input_tokens = 32_768
         self.stats = []
         self._lock = threading.Lock()
 

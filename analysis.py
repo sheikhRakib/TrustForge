@@ -1,4 +1,4 @@
-"""Deterministic, bounded Python semantics and multilingual diff heuristics."""
+"""Deterministic, bounded Python semantics and multilingual analysis."""
 
 from __future__ import annotations
 import re
@@ -6,6 +6,7 @@ import threading
 from dataclasses import dataclass, field
 from source_tools import strip_source, LANGUAGES
 from semantic import PythonAnalyzer
+from multilang import analyze_files as analyze_multilang_files
 
 _SEMANTIC_LOCK = threading.Lock()
 
@@ -445,13 +446,13 @@ class ProgramAnalyzer:
         # Z3 default contexts are not thread-safe for concurrent analysis.
         with _SEMANTIC_LOCK:
             findings, warnings = PythonAnalyzer(files, disabled=disabled).run()
+        multi_findings, multi_warnings = analyze_multilang_files(
+            files, disabled=disabled
+        )
+        findings = list(findings) + multi_findings
+        warnings = list(warnings) + multi_warnings
         report.findings = [Finding(**f) for f in findings if f["kind"] not in disabled]
         report.warnings = warnings
-        non_python = [p for p in files if not p.endswith((".py", ".pyi"))]
-        if non_python:
-            report.warnings.append(
-                f"{len(non_python)} non-Python files: semantic taint/symbolic/import analysis unavailable"
-            )
         if diff and "diff" not in disabled:
             # Never condition the defense on the benchmark's ground-truth CWE.
             report.findings.extend(analyze_diff(diff))

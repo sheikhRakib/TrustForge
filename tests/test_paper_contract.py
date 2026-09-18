@@ -52,10 +52,25 @@ class AblationContractTests(unittest.TestCase):
         self.assertFalse(any(f["kind"] in {"taint", "symbolic"} for f in findings))
         self.assertTrue(any(f["kind"] == "sink" for f in findings))
 
-    def test_non_python_semantics_are_explicitly_unavailable(self):
-        report = ProgramAnalyzer().analyze({"x.js": "eval(input);"})
-        self.assertFalse(report.findings)
-        self.assertTrue(any("non-Python files" in warning for warning in report.warnings))
+    def test_non_python_semantics_use_multilang_heuristics(self):
+        report = ProgramAnalyzer().analyze(
+            {"x.js": "const x = req.body; eval(x);\n"}
+        )
+        self.assertTrue(any(f.kind == "sink" for f in report.findings))
+        self.assertTrue(any(f.kind == "taint" for f in report.findings))
+        self.assertTrue(
+            any("multilingual sink/taint heuristics" in w for w in report.warnings)
+        )
+        self.assertTrue(
+            any("Python-only" in w for w in report.warnings)
+        )
+
+    def test_non_python_taint_ablation_keeps_sink_inventory(self):
+        report = ProgramAnalyzer().analyze(
+            {"x.js": "eval(req.body);\n"}, disabled=("taint",)
+        )
+        self.assertTrue(any(f.kind == "sink" for f in report.findings))
+        self.assertFalse(any(f.kind == "taint" for f in report.findings))
 
 
 class VariantScopeTests(unittest.TestCase):
@@ -97,6 +112,12 @@ class OutputLocationTests(unittest.TestCase):
         self.assertEqual(DEFAULT_REPORT_DIR.parts[0], "output")
         self.assertTrue(is_slurm_log_path(SLURM_LOG_DIR / "x.jsonl"))
         self.assertFalse(is_slurm_log_path(DEFAULT_OUTPUT))
+
+    def test_default_model_and_input_budget_match_qwen25_3b(self):
+        from main import DEFAULT_MAX_INPUT_TOKENS, MODEL_NAME
+
+        self.assertEqual(MODEL_NAME, "Qwen/Qwen2.5-3B-Instruct")
+        self.assertEqual(DEFAULT_MAX_INPUT_TOKENS, 32_768)
 
 
 if __name__ == "__main__":
