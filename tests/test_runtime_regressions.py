@@ -68,7 +68,7 @@ class RuntimeTests(unittest.TestCase):
             patch.object(agent, "defense_review", side_effect=review),
             patch("torch.cuda.empty_cache") as empty,
         ):
-            row = evaluate_mode(agent, llm, self.example, "baseline")
+            row = evaluate_mode(agent, llm, self.example, "hybrid")
         self.assertEqual(calls, [(self.example, 8192), (self.example, 4096)])
         self.assertEqual(row["oom_retries"], 1)
         self.assertEqual(row["abandoned_inference_calls"], 1)
@@ -76,7 +76,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(row["input_budgets"], [8192, 4096])
         empty.assert_called_once()
         with patch.object(agent, "defense_review", return_value="APPROVE"):
-            next_row = evaluate_mode(agent, llm, self.example, "baseline")
+            next_row = evaluate_mode(agent, llm, self.example, "hybrid")
         self.assertEqual(next_row["input_budgets"], [8192])
 
     def test_changed_chunk_budget_does_not_reuse_prior_review(self):
@@ -101,7 +101,7 @@ class RuntimeTests(unittest.TestCase):
             patch("torch.cuda.empty_cache"),
             self.assertRaises(torch.cuda.OutOfMemoryError),
         ):
-            evaluate_mode(agent, llm, self.example, "baseline", max_oom_retries=1)
+            evaluate_mode(agent, llm, self.example, "hybrid", max_oom_retries=1)
         self.assertEqual(review.call_count, 2)
 
     def test_other_errors_are_not_retried(self):
@@ -113,5 +113,5 @@ class RuntimeTests(unittest.TestCase):
             ) as review,
             self.assertRaisesRegex(RuntimeError, "bug"),
         ):
-            evaluate_mode(agent, llm, self.example, "baseline")
+            evaluate_mode(agent, llm, self.example, "hybrid")
         self.assertEqual(review.call_count, 1)

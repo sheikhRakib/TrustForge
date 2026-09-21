@@ -3,9 +3,7 @@
 from __future__ import annotations
 import argparse
 from collections import Counter
-import hashlib
 import gc
-import importlib.metadata
 import json
 from pathlib import Path
 import random
@@ -20,7 +18,7 @@ MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 DEFAULT_MAX_INPUT_TOKENS = 32_768
 DEFAULT_OUTPUT = Path("output/evaluation.jsonl")
 SLURM_LOG_DIR = Path(__file__).resolve().parent / "logs"
-MODES = ("baseline", "multi_agent", "hybrid", "analysis_only")
+MODES = ("multi_agent", "hybrid", "analysis_only")
 DISABLE = (
     "scanner",
     "injection",
@@ -87,7 +85,7 @@ def parse_args():
         type=Path,
         help="Explicit enriched/augmented JSONL; otherwise use local SEVRA_enriched",
     )
-    p.add_argument("--modes", default="baseline,multi_agent,hybrid")
+    p.add_argument("--modes", default="multi_agent,hybrid")
     p.add_argument(
         "--disable",
         default="",
@@ -251,47 +249,7 @@ def main():
         )
     if args.dry_run:
         return
-    config = {
-        k: str(v) if isinstance(v, Path) else v
-        for k, v in vars(args).items()
-        if k not in {"output", "dry_run"}
-    }
-    config["dataset_sha256"] = hashlib.sha256(
-        json.dumps(benchmark, sort_keys=True, ensure_ascii=True).encode()
-    ).hexdigest()
-    config["selected_example_count"] = len(benchmark)
-    config["expected_records"] = len(benchmark) * len(args.modes)
-    config["oom_policy"] = {
-        "max_retries": 4,
-        "minimum_input_tokens": 512,
-        "budget_reset": "each_mode_review",
-        "reduction": "halve",
-    }
-    config["code_sha256"] = {
-        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in sorted(Path(__file__).parent.glob("*.py"))
-    }
-    config["packages"] = {
-        p: importlib.metadata.version(p)
-        for p in [
-            "torch",
-            "transformers",
-            "accelerate",
-            "tree-sitter-language-pack",
-            "z3-solver",
-        ]
-    }
-    manifest = args.output.with_suffix(".manifest.json")
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    if manifest.exists():
-        if json.loads(manifest.read_text()) != config:
-            raise SystemExit(
-                "Output manifest differs: choose a new --output for changed data/code/config"
-            )
-    elif args.output.exists():
-        raise SystemExit("Existing output has no manifest; choose a new --output")
-    else:
-        manifest.write_text(json.dumps(config, indent=2) + "\n")
     results = []
     done = set()
     if args.output.exists():

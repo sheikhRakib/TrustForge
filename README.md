@@ -32,16 +32,20 @@ python main.py --dry-run
 # Small, deterministically balanced sample on this Slurm cluster:
 sbatch run.slurm --limit 4 --output output/smoke.jsonl
 
-# All three systems on the full existing dataset:
+# Self-contained single-model baseline on the four selected CWEs (GPU required):
+# This file contains the baseline prompt, model loading, inference, and scoring.
+python baseline.py
+
+# Multi-agent and hybrid systems on the full existing dataset:
 sbatch run.slurm --output output/full.jsonl
 ```
 
 The launchers request one GPU, 32 GB host RAM, and 12 hours (enough for the
 default 3B model). A full run may need more than one allocation. Resubmit the
 **same command** to resume completed example/mode records. Use a new output path
-after changing code, data, model, options, or ablations: the manifest rejects
-incompatible resumptions. `logs/` is reserved for Slurm stdout/stderr and GPU
-telemetry. Model responses, manifests, summaries, reports, and figures belong
+after changing code, data, model, options, or ablations to avoid mixing results.
+`logs/` is reserved for Slurm stdout/stderr and GPU telemetry. Model responses,
+summaries, reports, and figures belong
 under `output/`. Create `logs/` before submitting on a fresh clone because Slurm
 opens its log files before the script starts.
 
@@ -64,19 +68,18 @@ Adjust the partition, QoS, GPU count, and memory in the launchers for other site
 | `--cwe cwe89` | Repeatable CWE filter for local SEVRA |
 | `--hard-split` | Keep malicious examples with an upstream `failed_by` entry; keep benign controls |
 | `--limit N --seed 42` | Deterministic sampling balanced across labels when available |
-| `--modes baseline,multi_agent,hybrid` | Choose systems; `analysis_only` is also supported without a GPU |
+| `--modes multi_agent,hybrid` | Choose shared-runner systems; `analysis_only` is also supported without a GPU |
 | `--benchmark PATH` | Evaluate an explicit enriched/augmented JSONL; requires PR metadata/diff; absent head files cause auditor abstention |
 | `--max-input-tokens 32768` | Per-call input budget; also reserves output space in the model context |
 | `--model ID` | Hugging Face model override; model must support the configured SDPA attention backend |
 | `--disable stripping,grounding` | Component ablations; see below |
-| `--output PATH` | Append-only results with automatic compatible resume |
+| `--output PATH` | Append-only results with checkpoint resume |
 
 For an output `output/full.jsonl`, the runner writes:
 
 - `full.jsonl`: verdicts, reasons, diagnostics, labels, per-call token counts,
   incremental and attributed elapsed time, shared inference costs, OOM retries,
   attempted input budgets, and process peak GPU allocations.
-- `full.manifest.json`: options, expected record count, selected-dataset hash, code hashes, package versions.
 - `full.runtime.json`: model revision, GPU names, CUDA version (LLM runs).
 - `full.summary.json`: overall and per-variant/framing/CWE/source metrics on completion.
 
@@ -91,12 +94,11 @@ metrics; a low ASR alone does not establish useful review quality.
 python report.py output/full.jsonl --output-dir output/full-report
 ```
 
-This exports metrics CSV, report completion status, and SVG ASR figures by variant,
-separating SEVRA and synthetic fixtures. By default it rejects incomplete results
-or older manifests whose expected count cannot be verified. For diagnostic
-reports only, add `--allow-partial`; their figures are labeled partial/unverified.
-Completion means all selected examples and modes finished, not necessarily the
-full SEVRA dataset (a completed smoke test is still a smoke test).
+This exports metrics CSV, report status, and SVG ASR figures by variant,
+separating SEVRA and synthetic fixtures. By default it requires every observed
+mode to contain the same examples. For diagnostic reports with uneven observed
+modes, add `--allow-partial`; their figures are labeled partial/unverified. The
+report cannot infer whether an entirely absent mode or record was expected.
 
 ## What is implemented
 

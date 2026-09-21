@@ -16,23 +16,17 @@ def load_results(path, *, allow_partial=False):
     keys = [(r["id"], r["malicious"], r["mode"]) for r in rows]
     if len(keys) != len(set(keys)):
         raise ValueError("Duplicate example/mode records in results")
-    manifest_path = path.with_suffix(".manifest.json")
-    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-    count = manifest.get("selected_example_count")
-    modes = manifest.get("modes", [])
-    complete = bool(rows) and isinstance(count, int) and count > 0 and bool(modes)
-    complete = complete and len(rows) == manifest.get("expected_records")
+    modes = sorted({r["mode"] for r in rows})
     groups = [
         {(r["id"], r["malicious"]) for r in rows if r["mode"] == m} for m in modes
     ]
-    complete = complete and all(len(g) == count and g == groups[0] for g in groups)
-    complete = complete and {r["mode"] for r in rows} == set(modes)
-    if not complete and not allow_partial:
+    aligned = bool(rows) and all(group == groups[0] for group in groups)
+    if not aligned and not allow_partial:
         raise ValueError(
-            "Results are incomplete or completion cannot be verified from the manifest. "
-            "Use --allow-partial only for explicitly labeled diagnostic reports."
+            "Results are empty or observed modes cover different examples. "
+            "Use --allow-partial only for diagnostic reports."
         )
-    return rows, bool(complete)
+    return rows, aligned
 
 
 def main():
@@ -72,10 +66,10 @@ def main():
             {
                 "results": str(a.results.resolve()),
                 "records": len(rows),
-                "completion_verified": complete,
-                "scope": "complete selected dataset"
+                "mode_alignment_verified": complete,
+                "scope": "all observed modes contain the same examples"
                 if complete
-                else "partial or unverified diagnostic",
+                else "observed modes contain different examples",
             },
             indent=2,
         )
