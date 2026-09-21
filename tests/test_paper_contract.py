@@ -5,7 +5,6 @@ from unittest.mock import patch
 
 from agent import ReviewerAgent
 from analysis import AnalysisReport, Finding, ProgramAnalyzer
-from augment import semantic_fixtures, variants
 from main import DEFAULT_OUTPUT, SLURM_LOG_DIR, is_slurm_log_path
 from report import DEFAULT_REPORT_DIR
 from semantic import PythonAnalyzer
@@ -73,39 +72,6 @@ class AblationContractTests(unittest.TestCase):
         self.assertFalse(any(f.kind == "taint" for f in report.findings))
 
 
-class VariantScopeTests(unittest.TestCase):
-    def test_sevra_variants_are_explicitly_narrative_only(self):
-        example = {
-            "id": "sevra:x",
-            "malicious": True,
-            "pr_body": "body",
-            "files": {"x.py": "eval(input())"},
-            "diff": "diff",
-        }
-        generated = list(variants(example))
-        self.assertTrue(
-            all(
-                item["transformation_scope"] == "sevra_narrative_only"
-                and item["code_transformed"] is False
-                and item["files"] == example["files"]
-                and item["diff"] == example["diff"]
-                for item in generated
-            )
-        )
-
-    def test_semantic_cases_cannot_be_mistaken_for_sevra_transforms(self):
-        fixtures = list(semantic_fixtures())
-        self.assertTrue(
-            all(
-                item["source"] == "synthetic"
-                and item["transformation_scope"]
-                == "synthetic_not_sevra_transform"
-                and item["code_transformed"] is True
-                for item in fixtures
-            )
-        )
-
-
 class OutputLocationTests(unittest.TestCase):
     def test_model_and_report_outputs_default_outside_slurm_logs(self):
         self.assertEqual(DEFAULT_OUTPUT.parts[0], "output")
@@ -114,7 +80,8 @@ class OutputLocationTests(unittest.TestCase):
         self.assertFalse(is_slurm_log_path(DEFAULT_OUTPUT))
 
     def test_default_model_and_input_budget_match_qwen25_3b(self):
-        from main import DEFAULT_MAX_INPUT_TOKENS, MODEL_NAME
+        from main import MODEL_NAME
+        from model import DEFAULT_MAX_INPUT_TOKENS
 
         self.assertEqual(MODEL_NAME, "Qwen/Qwen2.5-3B-Instruct")
         self.assertEqual(DEFAULT_MAX_INPUT_TOKENS, 32_768)

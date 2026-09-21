@@ -29,15 +29,12 @@ conda env update -f environment.yml
 # Validate existing data and options without loading model weights:
 python main.py --dry-run
 
-# Small, deterministically balanced sample on this Slurm cluster:
-sbatch run.slurm --limit 4 --output output/smoke.jsonl
+# The fixed Slurm script runs the four selected CWEs with all three systems:
+sbatch run.slurm
 
-# Self-contained single-model baseline on the four selected CWEs (GPU required):
-# This file contains the baseline prompt, model loading, inference, and scoring.
-python baseline.py
-
-# Multi-agent and hybrid systems on the full existing dataset:
-sbatch run.slurm --output output/full.jsonl
+# On an allocated GPU node, evaluate baseline through the shared runner:
+python main.py --cwe cwe78 --cwe cwe79 --cwe cwe89 --cwe cwe94 \
+  --modes baseline --output output/baseline-from-main.jsonl
 ```
 
 The launchers request one GPU, 32 GB host RAM, and 12 hours (enough for the
@@ -49,7 +46,7 @@ summaries, reports, and figures belong
 under `output/`. Create `logs/` before submitting on a fresh clone because Slurm
 opens its log files before the script starts.
 
-For an interactive allocation:
+For an interactive allocation, the launcher forwards options to `main.py`:
 
 ```bash
 ./run_srun.sh --limit 4 --output output/interactive.jsonl
@@ -68,8 +65,8 @@ Adjust the partition, QoS, GPU count, and memory in the launchers for other site
 | `--cwe cwe89` | Repeatable CWE filter for local SEVRA |
 | `--hard-split` | Keep malicious examples with an upstream `failed_by` entry; keep benign controls |
 | `--limit N --seed 42` | Deterministic sampling balanced across labels when available |
-| `--modes multi_agent,hybrid` | Choose shared-runner systems; `analysis_only` is also supported without a GPU |
-| `--benchmark PATH` | Evaluate an explicit enriched/augmented JSONL; requires PR metadata/diff; absent head files cause auditor abstention |
+| `--modes baseline,multi_agent,hybrid` | Select any combination of systems; the default is all three. `analysis_only` also works without a GPU |
+| `--benchmark PATH` | Evaluate an existing benchmark JSONL; requires PR metadata/diff; absent head files cause auditor abstention |
 | `--max-input-tokens 32768` | Per-call input budget; also reserves output space in the model context |
 | `--model ID` | Hugging Face model override; model must support the configured SDPA attention backend |
 | `--disable stripping,grounding` | Component ablations; see below |
@@ -77,9 +74,7 @@ Adjust the partition, QoS, GPU count, and memory in the launchers for other site
 
 For an output `output/full.jsonl`, the runner writes:
 
-- `full.jsonl`: verdicts, reasons, diagnostics, labels, per-call token counts,
-  incremental and attributed elapsed time, shared inference costs, OOM retries,
-  attempted input budgets, and process peak GPU allocations.
+- `full.jsonl`: verdicts, model responses, labels, and example metadata.
 - `full.runtime.json`: model revision, GPU names, CUDA version (LLM runs).
 - `full.summary.json`: overall and per-variant/framing/CWE/source metrics on completion.
 
@@ -104,10 +99,17 @@ report cannot infer whether an entirely absent mode or record was expected.
 
 - Scanner triage prioritizes files; the injection detector flags reviewer
   manipulation. These are separate model calls using the same weights.
-- The auditor receives syntax-stripped source with original file and line
-  coordinates. Tree-sitter handles Python, JavaScript/TypeScript, C/C++, PHP,
+- The auditor receives changed diff hunks and numbered, syntax-stripped
+  current source lines within five lines of each change. It compares removed
+  and added code before returning a short verdict plus an optional line ID.
+  The code constructs citations from
+  visible lines; the model does not write citation paths or quotes. Tree-sitter
+  handles Python, JavaScript/TypeScript, C/C++, PHP,
   Java, Go, Ruby, Rust, C#, Bash, Swift, Kotlin, and Scala. Python docstrings
   are removed using Python AST positions. Literal contents are preserved.
+- This diff-scoped review applies to source files and lockfiles alike. If a
+  matching hunk is unavailable, the auditor reviews the full supplied source
+  and reports a warning.
 - Grounding validates the exact file, original line number, and nonempty quoted
   source excerpt, including whether it was visible in the auditor call. It
   checks evidence existence, not the correctness of the model's reasoning.
@@ -134,10 +136,15 @@ report cannot infer whether an entirely absent mode or record was expected.
   string interpolation is retained. SQL diff rules inspect API argument
   construction rather than keywords inside strings. These are advisory
   heuristics, not compiler proofs. Ground-truth CWE labels do not select rules.
-- The aggregator blocks source-grounded auditor defects and comments on concerns
-  or advisory analysis. Narrative suspicion alone does not reject otherwise
+- The multi-agent aggregator blocks source-grounded auditor defects and comments
+  on auditor concerns. Narrative suspicion alone does not reject otherwise
   approved code. Safe approvals do not require a nonexistent vulnerability
   citation. Missing head files (including deletion-only PRs) and malformed auditor decisions remain UNKNOWN.
+- Hybrid uses the scanner, injection detector, auditor, and program analysis.
+  A separate final model review considers their bounded signals alongside the
+  PR diff and makes its own verdict; it does not inherit the multi-agent verdict.
+  Component signals are advisory, so the final reviewer can approve a fix that
+  the auditor flagged or reject a defect the auditor missed.
 
 There is no claim of complete, injection-immune verification: full symbolic and
 import-aware analysis remains Python-specific; other supported languages use
@@ -156,7 +163,8 @@ exhausted memory on two A100 40 GB GPUs; the smaller 3B model makes the full
 window practical. Oversized content is still reviewed in chunks when it exceeds
 the budget; system instructions and chat formatting are kept for every call.
 PR narrative/diff prompts no longer silently discard their tails. Auditor
-chunks include source coordinates and cover all supplied changed-file contents.
+chunks cover changed hunks and nearby current source. Files without a matching
+hunk fall back to full supplied source, with a warning.
 Extremely long lines may cross chunk boundaries, limiting evidence citation
 for those line fragments.
 
@@ -168,14 +176,13 @@ old enrichment truncations or include unchanged repository Python files.
 
 Inference uses GPU SDPA attention, inference mode, and the KV cache. The existing
 Transformers generation implementation computes only needed output logits.
-Multi-agent and hybrid reuse their identical LLM outputs for each example.
+When both modes run on the same PR, hybrid reuses the scanner, injection, and
+auditor calls, then adds its own final model calls. It can reach a different
+verdict from multi-agent.
 Small source files share auditor calls.
-Result `seconds` measures actual incremental work; `attributed_seconds` also
-charges the cached multi-agent review to hybrid. `reused_inference` records those
-shared calls. Do not sum attributed times to estimate job wall time or interpret
-a cached hybrid result as near-zero standalone latency. Completed inference calls
-from abandoned OOM attempts remain recorded; failed calls have elapsed wall time
-but no completed token counts.
+The Slurm log prints elapsed time and model-call count for each review. JSONL
+results omit per-call timing, token counts, GPU memory, and OOM retry details;
+OOM recovery still retries the complete review with a smaller input budget.
 
 Full source coverage can require more work than earlier truncated runs; GPU use
 alone is not a guarantee of high throughput on every input.
@@ -197,39 +204,25 @@ fit. Lower `--max-input-tokens` to create smaller chunks, or request more GPU
 memory. Larger models may need a lower default budget and more GPUs than the
 current 3B launchers.
 
-## Robustness variants and ablations
+## Ablations
 
 ```bash
-# Whole (repository, vulnerability) groups are assigned to disjoint splits.
-# Narrative templates differ between those splits. Outputs must not exist yet.
-python augment.py --split train --output data/variants-train.jsonl
-python augment.py --split test --output data/variants-test.jsonl
-
-# Explicitly separate controlled homoglyph-identifier and cross-file fixtures:
-python augment.py --fixtures-only --output data/semantic-fixtures.jsonl
-
-sbatch run.slurm --benchmark data/variants-test.jsonl --output output/variants-test.jsonl
-sbatch run.slurm --benchmark data/semantic-fixtures.jsonl --output output/semantic-fixtures.jsonl
-
 # Same dataset/sample seed, separate output for each ablation:
-sbatch run.slurm --disable stripping --output output/no-stripping.jsonl
-sbatch run.slurm --disable grounding --output output/no-grounding.jsonl
-sbatch run.slurm --disable symbolic --output output/no-symbolic.jsonl
+./run_srun.sh --disable stripping --output output/no-stripping.jsonl
+./run_srun.sh --disable grounding --output output/no-grounding.jsonl
+./run_srun.sh --disable symbolic --output output/no-symbolic.jsonl
 ```
 
-Narrative variants add authority, role-hijack, Base64, and hex instructions while
-preserving the original code/diff and truth label. Benign controls receive
-instructions to BLOCK; malicious examples receive instructions to APPROVE.
-Homoglyph/cross-file fixtures are synthetic Python examples, **not** transformed
-SEVRA vulnerabilities. The paper must distinguish this scope from a claim of
-SEVRA-wide semantics-preserving code obfuscation. Ablation names are `scanner`,
+This repository no longer generates narrative variants or synthetic fixtures.
+If you already have a benchmark JSONL containing them, `main.py --benchmark`
+can still evaluate it. Ablation names are `scanner`,
 `injection`, `stripping`, `grounding`, `taint`, `symbolic`, `cross_file`, and `diff`.
 `symbolic` disables constraint solving and witnesses while retaining taint;
 `taint` disables taint and its dependent symbolic witnesses while retaining the
 structural sink inventory. Both retain the shared AST traversal. The code and
 reporting tools do not establish paper results until the corresponding runs finish.
 This repository performs inference/evaluation; it does not train or fine-tune the
-reviewer. The train/test names refer to robustness-template development and testing.
+reviewer.
 
 ## Rebuild data on a fresh machine
 
@@ -282,5 +275,5 @@ bash -n run.slurm run_srun.sh monitor_gpus.sh
 Tests cover source stripping, literal-text false positives, SQL parameterization,
 request-source assumptions, grounding, taint, satisfiable/unsatisfiable paths,
 import resolution, multilingual sink/taint heuristics, label-independent analysis,
-invalid verdict scoring, augmentation preservation, chunk coverage, OOM recovery,
+invalid verdict scoring, chunk coverage, OOM recovery,
 report completion checks, and reuse and timing of agent calls.

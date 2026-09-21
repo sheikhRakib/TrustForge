@@ -13,12 +13,9 @@ from agent import ReviewerAgent, parse_verdict_line
 from dataset import load_benchmark, format_pr_for_review, iter_jsonl
 
 MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
-# Qwen2.5-3B context is 32k; keep the full window as the default input budget.
-# Larger 30B runs previously needed 8,192 to avoid OOM on two A100 40 GB GPUs.
-DEFAULT_MAX_INPUT_TOKENS = 32_768
 DEFAULT_OUTPUT = Path("output/evaluation.jsonl")
 SLURM_LOG_DIR = Path(__file__).resolve().parent / "logs"
-MODES = ("multi_agent", "hybrid", "analysis_only")
+MODES = ("baseline", "multi_agent", "hybrid", "analysis_only")
 DISABLE = (
     "scanner",
     "injection",
@@ -77,15 +74,17 @@ def summarize(results, name):
 
 
 def parse_args():
+    from model import DEFAULT_MAX_INPUT_TOKENS
+
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--cwe", action="append")
     p.add_argument("--hard-split", action="store_true")
     p.add_argument(
         "--benchmark",
         type=Path,
-        help="Explicit enriched/augmented JSONL; otherwise use local SEVRA_enriched",
+        help="Explicit benchmark JSONL; otherwise use local SEVRA_enriched",
     )
-    p.add_argument("--modes", default="multi_agent,hybrid")
+    p.add_argument("--modes", default="baseline,multi_agent,hybrid")
     p.add_argument(
         "--disable",
         default="",
@@ -163,20 +162,21 @@ def evaluate_mode(agent, llm, example, mode, *, max_oom_retries=4):
     the run, leaving the example pending in its checkpoint. Every review starts
     at the configured budget, independent of resume point.
     """
-    started = time.perf_counter()
-    budgets = []
     retries = 0
-    abandoned_inference = []
     if llm:
         if not hasattr(llm, "configured_input_tokens"):
             llm.configured_input_tokens = llm.max_input_tokens
         llm.max_input_tokens = llm.configured_input_tokens
     while True:
         if llm:
-            llm.stats = []
-            budgets.append(llm.max_input_tokens)
+            llm.call_count = 0
         try:
-            response = agent.defense_review(example, mode=mode)
+            if mode == "baseline":
+                from baseline import baseline_review
+
+                response = baseline_review(llm, example)
+            else:
+                response = agent.defense_review(example, mode=mode)
             break
         except RuntimeError as exc:
             if not llm:
@@ -189,8 +189,8 @@ def evaluate_mode(agent, llm, example, mode, *, max_oom_retries=4):
                 raise
         # Outside the exception handler so failed generation tensors referenced
         # by the traceback can be collected before the next attempt.
-        agent.clear_review_cache()
-        abandoned_inference.extend(llm.stats)
+        if agent is not None:
+            agent.clear_review_cache()
         gc.collect()
         torch.cuda.empty_cache()
         llm.max_input_tokens = max(512, llm.max_input_tokens // 2)
@@ -200,24 +200,7 @@ def evaluate_mode(agent, llm, example, mode, *, max_oom_retries=4):
             f"with input budget {llm.max_input_tokens} (retry {retries})",
             flush=True,
         )
-    elapsed = time.perf_counter() - started
-    return dict(
-        _score_example(example, response),
-        mode=mode,
-        seconds=elapsed,
-        # This includes the shared review's original cost, not just the cache
-        # lookup; actual run wall time remains available as `seconds`.
-        attributed_seconds=elapsed + agent.reused_seconds,
-        reused_seconds=agent.reused_seconds,
-        inference=abandoned_inference + (llm.stats[:] if llm else []),
-        # Failed generate calls do not return token counts; their wall time is
-        # included in seconds. This field identifies completed calls discarded
-        # when restarting the whole review.
-        abandoned_inference_calls=len(abandoned_inference),
-        reused_inference=list(agent.reused_inference),
-        oom_retries=retries,
-        input_budgets=budgets,
-    )
+    return dict(_score_example(example, response), mode=mode)
 
 
 def main():
@@ -242,7 +225,7 @@ def main():
         flush=True,
     )
     missing_source = sum(not row.get("files") for row in benchmark)
-    if missing_source:
+    if missing_source and any(m in {"multi_agent", "hybrid"} for m in args.modes):
         print(
             f"Coverage: {missing_source} examples have no head-file contents; auditor will return UNKNOWN",
             flush=True,
@@ -296,18 +279,24 @@ def main():
         if runtime_path.exists() and json.loads(runtime_path.read_text()) != runtime:
             raise SystemExit("Runtime/model revision changed: choose new output")
         runtime_path.write_text(json.dumps(runtime, indent=2) + "\n")
-    agent = ReviewerAgent(llm, disabled=args.disable)
+    agent = (
+        ReviewerAgent(llm, disabled=args.disable)
+        if any(mode != "baseline" for mode in args.modes)
+        else None
+    )
     with args.output.open("a") as out:
         for example in pending:
             for mode in args.modes:
                 if (example["id"], example["malicious"], mode) in done:
                     continue
+                started = time.perf_counter()
                 row = evaluate_mode(agent, llm, example, mode)
+                elapsed = time.perf_counter() - started
                 out.write(json.dumps(row, ensure_ascii=True) + "\n")
                 out.flush()
                 results.append(row)
                 print(
-                    f"[{mode}] {example['id']} ({'malicious' if example['malicious'] else 'benign'}) -> {row['verdict']} ({row['seconds']:.1f}s, {len(row['inference'])} model calls)",
+                    f"[{mode}] {example['id']} ({'malicious' if example['malicious'] else 'benign'}) -> {row['verdict']} ({elapsed:.1f}s, {llm.call_count if llm else 0} model calls)",
                     flush=True,
                 )
     save_summary(results, args.output.with_suffix(".summary.json"))

@@ -1,9 +1,12 @@
-"""Standalone baseline behavior without loading model weights."""
+"""Baseline behavior through main.py without loading model weights."""
 
-from pathlib import Path
+import subprocess
+import sys
 import unittest
+from unittest.mock import patch
 
 import baseline
+from main import evaluate_mode, parse_args
 from model import LLMModel
 
 
@@ -11,6 +14,8 @@ class FakeModel:
     def __init__(self, responses):
         self.responses = iter(responses)
         self.calls = []
+        self.max_input_tokens = 8192
+        self.call_count = 0
 
     def split_user(self, system, text, max_new_tokens):
         self.calls.append(("split", system, text, max_new_tokens))
@@ -18,47 +23,13 @@ class FakeModel:
 
     def generate(self, system, text, max_new_tokens):
         self.calls.append(("generate", system, text, max_new_tokens))
+        self.call_count += 1
         return next(self.responses)
 
 
 class BaselineRunnerTests(unittest.TestCase):
-    def test_prompt_model_and_review_are_defined_in_standalone_module(self):
-        self.assertIn("pull-request diff", baseline.BASELINE_SYSTEM)
-        self.assertIn("exactly APPROVE:, COMMENT:, or BLOCK:", baseline.BASELINE_SYSTEM)
-        self.assertIn("Do not repeat these instructions", baseline.BASELINE_SYSTEM)
-        self.assertIs(baseline.LLMModel, LLMModel)
-        self.assertEqual(baseline.baseline_review.__module__, "baseline")
-
-    def test_defaults_to_four_cwes_and_output_directory(self):
-        arguments = baseline.parse_args(["--dry-run"])
-        self.assertEqual(arguments.cwe, list(baseline.DEFAULT_CWES))
-        self.assertEqual(arguments.output, baseline.DEFAULT_OUTPUT)
-        self.assertEqual(arguments.model, "Qwen/Qwen2.5-3B-Instruct")
-
-    def test_explicit_scope_and_output_are_preserved(self):
-        arguments = baseline.parse_args(
-            [
-                "--cwe",
-                "cwe89",
-                "--output",
-                "output/custom.jsonl",
-                "--limit",
-                "2",
-            ]
-        )
-        self.assertEqual(arguments.cwe, ["cwe89"])
-        self.assertEqual(arguments.output, Path("output/custom.jsonl"))
-        self.assertEqual(arguments.limit, 2)
-
-    def test_custom_benchmark_does_not_claim_default_cwe_filter(self):
-        arguments = baseline.parse_args(
-            ["--benchmark", "data/custom.jsonl", "--dry-run"]
-        )
-        self.assertIsNone(arguments.cwe)
-
-    def test_baseline_calls_model_with_local_system_prompt(self):
-        model = FakeModel(["APPROVE: first", "COMMENT: second"])
-        example = {
+    def setUp(self):
+        self.example = {
             "id": "x",
             "malicious": False,
             "pr_title": "title",
@@ -66,7 +37,28 @@ class BaselineRunnerTests(unittest.TestCase):
             "files_changed": ["x.py"],
             "diff": "+safe = True",
         }
-        response = baseline.baseline_review(model, example)
+
+    def test_prompt_and_review_remain_in_baseline_module(self):
+        self.assertIn("pull-request diff", baseline.BASELINE_SYSTEM)
+        self.assertIn("exactly APPROVE:, COMMENT:, or BLOCK:", baseline.BASELINE_SYSTEM)
+        self.assertIn("Do not repeat these instructions", baseline.BASELINE_SYSTEM)
+        self.assertIs(baseline.LLMModel, LLMModel)
+        self.assertEqual(baseline.baseline_review.__module__, "baseline")
+
+    def test_main_accepts_baseline_scope_and_output(self):
+        with patch("sys.argv", [
+            "main.py", "--modes", "baseline", "--cwe", "cwe89",
+            "--output", "output/custom.jsonl", "--limit", "2",
+        ]):
+            args = parse_args()
+        self.assertEqual(args.modes, ["baseline"])
+        self.assertEqual(args.cwe, ["cwe89"])
+        self.assertEqual(str(args.output), "output/custom.jsonl")
+        self.assertEqual(args.limit, 2)
+
+    def test_baseline_calls_model_with_local_system_prompt(self):
+        model = FakeModel(["APPROVE: first", "COMMENT: second"])
+        response = baseline.baseline_review(model, self.example)
         self.assertTrue(response.startswith("COMMENT\n"))
         generated = [call for call in model.calls if call[0] == "generate"]
         self.assertEqual(len(generated), 2)
@@ -82,9 +74,24 @@ class BaselineRunnerTests(unittest.TestCase):
             baseline.combine_verdicts(["APPROVE: safe", "invalid"]), "UNKNOWN"
         )
 
-    def test_logs_directory_is_rejected_for_model_output(self):
-        with self.assertRaises(SystemExit):
-            baseline.parse_args(["--output", "logs/baseline.jsonl"])
+    def test_main_scores_baseline_without_performance_telemetry(self):
+        model = FakeModel(["APPROVE: first", "APPROVE: second"])
+        row = evaluate_mode(None, model, self.example, "baseline")
+        self.assertEqual(row["verdict"], "APPROVE")
+        self.assertEqual(row["mode"], "baseline")
+        self.assertEqual(model.call_count, 2)
+        self.assertTrue({
+            "inference", "seconds", "attributed_seconds", "reused_seconds",
+            "reused_inference", "oom_retries", "input_budgets",
+        }.isdisjoint(row))
+
+    def test_baseline_file_refuses_direct_execution(self):
+        result = subprocess.run(
+            [sys.executable, baseline.__file__], capture_output=True, text=True
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("main.py --modes baseline", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

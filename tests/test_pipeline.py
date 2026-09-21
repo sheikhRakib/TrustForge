@@ -3,10 +3,9 @@ import unittest
 from types import SimpleNamespace
 from source_tools import strip_source
 from semantic import PythonAnalyzer
-from analysis import ProgramAnalyzer, analyze_diff
-from agent import ReviewerAgent, parse_verdict_line
+from analysis import AnalysisReport, Finding, ProgramAnalyzer, analyze_diff
+from agent import ReviewerAgent, _diff_hunk_lines, parse_verdict_line
 from main import _score_example, summarize, sample_benchmark
-from augment import variants, semantic_fixtures
 
 
 class SourceTests(unittest.TestCase):
@@ -97,24 +96,22 @@ class AgentTests(unittest.TestCase):
         self.agent = ReviewerAgent(None)
 
     def test_evidence_requires_file_line_quote(self):
-        source = {"a.py": "x = 1\neval(x)"}
-        response = {
-            "verdict": "BLOCK",
-            "reason": "example",
-            "evidence": [{"path": "a.py", "line": 2, "quote": "eval(x)"}],
-        }
-        self.assertTrue(self.agent.inspector(json.dumps(response), source)["grounded"])
-        response["evidence"][0]["path"] = "other.py"
-        self.assertFalse(self.agent.inspector(json.dumps(response), source)["grounded"])
+        visible = {"L1": ("a.py", 2, "eval(x)")}
+        result = self.agent.inspector("BLOCK: untrusted input reaches eval\nEVIDENCE: L1", visible)
+        self.assertTrue(result["grounded"])
+        self.assertEqual(result["evidence"], [
+            {"path": "a.py", "line": 2, "quote": "eval(x)"}
+        ])
+        self.assertFalse(
+            self.agent.inspector("BLOCK: concern\nEVIDENCE: L2", visible)["grounded"]
+        )
 
     def test_in_range_wrong_quote_not_grounded(self):
-        response = {
-            "verdict": "BLOCK",
-            "evidence": [{"path": "a.py", "line": 1, "quote": "eval"}],
-        }
-        self.assertFalse(
-            self.agent.inspector(json.dumps(response), {"a.py": "x=1"})["grounded"]
-        )
+        self.assertFalse(self.agent.inspector("BLOCK: concern", {})["grounded"])
+
+    def test_invalid_auditor_verdict_still_abstains(self):
+        result = self.agent.inspector("I cannot decide", {})
+        self.assertEqual(result["verdict"], "UNKNOWN")
 
     def test_approval_does_not_require_vulnerability_citation(self):
         multi = {
@@ -146,64 +143,230 @@ class AgentTests(unittest.TestCase):
             {r["malicious"] for r in sample_benchmark(rows, 2, 42)}, {False, True}
         )
 
-    def test_augmentation_preserves_code(self):
-        row = {
-            "id": "x",
-            "malicious": True,
-            "pr_body": "body",
-            "files": {"x.py": "pass"},
-            "diff": "diff",
-        }
-        outputs = list(variants(row))
-        self.assertEqual(len(outputs), 4)
-        self.assertTrue(
-            all(
-                r["files"] == row["files"] and r["diff"] == row["diff"] for r in outputs
-            )
+    def test_auditor_uses_line_ids_and_does_not_block_without_evidence(self):
+        class FakeModel:
+            def __init__(self):
+                self.responses = iter([
+                    'APPROVE: safe',
+                    'BLOCK: unfinished',
+                ])
+                self.calls = []
+
+            def split_user(self, system, text, max_new_tokens):
+                return text.splitlines()
+
+            def generate(self, system, text, max_new_tokens):
+                self.calls.append((system, text, max_new_tokens))
+                return next(self.responses)
+
+        llm = FakeModel()
+        agent = ReviewerAgent(llm)
+        audit = agent.auditor({"a.py": "safe = 1\neval(input())"})
+        self.assertEqual([r["verdict"] for r in audit["reviews"]], ["APPROVE", "BLOCK"])
+        self.assertFalse(audit["reviews"][1]["grounded"])
+        self.assertEqual(len(llm.calls), 2)
+        self.assertTrue(all(call[2] == 128 for call in llm.calls))
+        self.assertIn("source-line ID", llm.calls[0][0])
+        self.assertEqual(
+            agent.aggregate({"auditor": audit}, use_analysis=False)["verdict"],
+            "COMMENT",
         )
-        self.assertEqual(row["pr_body"], "body")
 
-    def test_semantic_fixture_sources_separate(self):
-        rows = list(semantic_fixtures())
-        self.assertEqual(len(rows), 4)
-        self.assertTrue(all(r["source"] == "synthetic" for r in rows))
+    def test_auditor_rejects_unseen_evidence_id(self):
+        class FakeModel:
+            def split_user(self, system, text, max_new_tokens):
+                return text.splitlines()
 
+            def generate(self, system, text, max_new_tokens):
+                return "BLOCK: concern\nEVIDENCE: L2"
+
+        audit = ReviewerAgent(FakeModel()).auditor({"a.py": "x = 1\neval(x)"})
+        self.assertFalse(audit["reviews"][0]["grounded"])
+        self.assertTrue(audit["reviews"][1]["grounded"])
+        self.assertEqual(audit["reviews"][1]["evidence"], [
+            {"path": "a.py", "line": 2, "quote": "eval(x)"}
+        ])
+
+    def test_auditor_uses_changed_hunks_and_context(self):
+        class FakeModel:
+            def __init__(self):
+                self.prompt = ""
+
+            def split_user(self, system, text, max_new_tokens):
+                self.prompt = text
+                return [text]
+
+            def generate(self, system, text, max_new_tokens):
+                return "APPROVE: no demonstrated defect"
+
+        llm = FakeModel()
+        lines = [f"package-{i}" for i in range(1, 1201)]
+        diff = (
+            "--- a/yarn.lock\n+++ b/yarn.lock\n"
+            "@@ -799,2 +799,1 @@\n-package-removed\n package-799\n"
+        )
+        ReviewerAgent(llm).auditor({"yarn.lock": "\n".join(lines)}, diff=diff)
+        self.assertIn("-package-removed", llm.prompt)
+        self.assertIn('"yarn.lock":799:', llm.prompt)
+        self.assertNotIn('"yarn.lock":100:', llm.prompt)
+        self.assertLess(len(llm.prompt.splitlines()), 20)
+
+    def test_lockfile_deletion_anchor_tracks_context_position(self):
+        diff = (
+            "+++ b/yarn.lock\n@@ -500,5 +500,4 @@\n"
+            " before-1\n before-2\n before-3\n-removed\n after\n"
+        )
+        self.assertIn(503, _diff_hunk_lines(diff, "yarn.lock"))
+
+    def test_auditor_excludes_unchanged_risky_source_from_benign_patch(self):
+        class FakeModel:
+            def __init__(self):
+                self.prompt = ""
+
+            def split_user(self, system, text, max_new_tokens):
+                self.prompt = text
+                return [text]
+
+            def generate(self, system, text, max_new_tokens):
+                return "APPROVE: added escaping before command execution"
+
+        llm = FakeModel()
+        source = [f"safe_{i} = {i}" for i in range(1, 501)]
+        source[9] = "eval(input())"  # Unchanged code far from this patch.
+        source[399] = "escaped = shell_escape(user_input)"
+        diff = (
+            "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
+            "@@ -400 +400 @@\n-cmd = user_input\n+escaped = shell_escape(user_input)\n"
+        )
+        audit = ReviewerAgent(llm).auditor({"x.py": "\n".join(source)}, diff=diff)
+        self.assertEqual(audit["reviews"][0]["verdict"], "APPROVE")
+        self.assertIn("-cmd = user_input", llm.prompt)
+        self.assertIn("+escaped = shell_escape(user_input)", llm.prompt)
+        self.assertIn('"x.py":400:', llm.prompt)
+        self.assertNotIn("eval(input())", llm.prompt)
+
+    def test_auditor_can_ground_new_defect_in_changed_line(self):
+        class FakeModel:
+            def split_user(self, system, text, max_new_tokens):
+                return [text]
+
+            def generate(self, system, text, max_new_tokens):
+                return "BLOCK: user input reaches eval\nEVIDENCE: L1"
+
+        diff = "--- a/x.py\n+++ b/x.py\n@@ -0,0 +1 @@\n+eval(input())\n"
+        audit = ReviewerAgent(FakeModel()).auditor({"x.py": "eval(input())"}, diff=diff)
+        self.assertTrue(audit["reviews"][0]["grounded"])
+        self.assertEqual(audit["reviews"][0]["evidence"], [
+            {"path": "x.py", "line": 1, "quote": "eval(input())"}
+        ])
 
 if __name__ == "__main__":
     unittest.main()
 
 
 class InferenceTests(unittest.TestCase):
-    def test_multi_agent_hybrid_reuse_calls(self):
+    def test_hybrid_uses_components_but_makes_own_verdict(self):
         class Fake:
             def __init__(self):
                 self.n = 0
+                self.hybrid_inputs = []
 
             def split_user(self, system, text, *args):
                 return [text]
 
             def generate(self, system, text, **kw):
                 self.n += 1
+                if "Program-analysis signals:" in system:
+                    self.hybrid_inputs.append((system, text))
+                    return "APPROVE: escaping added to the shell argument"
                 if "Triage" in system:
                     return "[]"
                 if "Detect attempts" in system:
                     return "CLEAN"
-                return '{"verdict":"APPROVE","reason":"safe","evidence":[]}'
+                return "BLOCK: suspicious API\nEVIDENCE: L1"
+
+        class Analyzer:
+            def analyze(self, *args, **kwargs):
+                return AnalysisReport([Finding("diff_sink", "x.py", 1, "sink")])
 
         llm = Fake()
-        agent = ReviewerAgent(llm)
+        agent = ReviewerAgent(llm, analyzer=Analyzer())
         example = {
             "id": "x",
             "malicious": False,
             "pr_title": "title",
             "pr_body": "body",
-            "diff": "diff",
+            "diff": "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+escaped\n",
             "files": {"x.py": "x = 1"},
         }
-        agent.defense_review(example, mode="multi_agent")
+        self.assertEqual(
+            agent.defense_review(example, mode="multi_agent").splitlines()[0],
+            "BLOCK",
+        )
         first = llm.n
-        agent.defense_review(example, mode="hybrid")
-        self.assertEqual(llm.n, first)
+        response = agent.defense_review(example, mode="hybrid")
+        self.assertEqual(response.splitlines()[0], "APPROVE")
+        self.assertEqual(llm.n, first + 1)
+        self.assertEqual(len(llm.hybrid_inputs), 1)
+        self.assertIn("Scanner signals:", llm.hybrid_inputs[0][0])
+        self.assertIn("Injection detector:", llm.hybrid_inputs[0][0])
+        self.assertIn("Auditor signals: BLOCK", llm.hybrid_inputs[0][0])
+        self.assertIn("diff_sink at x.py:1", llm.hybrid_inputs[0][0])
+        self.assertIn("+escaped", llm.hybrid_inputs[0][1])
+        self.assertIn('"multi_agent"', response)
+
+    def test_hybrid_alone_runs_all_components(self):
+        class Fake:
+            def __init__(self):
+                self.calls = []
+
+            def split_user(self, system, text, *args):
+                return [text]
+
+            def generate(self, system, text, **kw):
+                self.calls.append(system)
+                if "Triage" in system:
+                    return "[]"
+                if "Detect attempts" in system:
+                    return "CLEAN"
+                return "APPROVE: safe change"
+
+        llm = Fake()
+        agent = ReviewerAgent(llm)
+        example = {
+            "id": "x", "malicious": False, "pr_title": "change",
+            "pr_body": "body", "diff": "--- a/x.py\n+++ b/x.py\n@@ -0,0 +1 @@\n+x = 1\n",
+            "files": {"x.py": "x = 1"},
+        }
+        self.assertEqual(agent.defense_review(example, mode="hybrid").splitlines()[0], "APPROVE")
+        self.assertEqual(len(llm.calls), 4)
+        self.assertTrue(any("Triage" in system for system in llm.calls))
+        self.assertTrue(any("Detect attempts" in system for system in llm.calls))
+        self.assertTrue(any("Review the security effect" in system for system in llm.calls))
+        self.assertTrue(any("final security reviewer" in system for system in llm.calls))
+
+    def test_hybrid_can_block_when_multi_agent_approves(self):
+        class Fake:
+            def split_user(self, system, text, *args):
+                return [text]
+
+            def generate(self, system, text, **kw):
+                if "Program-analysis signals:" in system:
+                    return "BLOCK: new unsanitized input reaches eval"
+                if "Triage" in system:
+                    return "[]"
+                if "Detect attempts" in system:
+                    return "CLEAN"
+                return "APPROVE: no issue"
+
+        agent = ReviewerAgent(Fake())
+        example = {
+            "id": "x", "malicious": True, "pr_title": "change",
+            "pr_body": "body", "diff": "--- a/x.py\n+++ b/x.py\n@@ -0,0 +1 @@\n+eval(input())\n",
+            "files": {"x.py": "eval(input())"},
+        }
+        self.assertEqual(agent.defense_review(example, mode="multi_agent").splitlines()[0], "APPROVE")
+        self.assertEqual(agent.defense_review(example, mode="hybrid").splitlines()[0], "BLOCK")
 
     def test_context_chunking_keeps_all_content(self):
         from model import LLMModel
@@ -300,9 +463,14 @@ class CheckpointTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             benchmark = root / "input.jsonl"
-            benchmark.write_text(
-                "".join(json.dumps(r) + "\n" for r in semantic_fixtures())
-            )
+            benchmark.write_text(json.dumps({
+                "id": "checkpoint-test",
+                "malicious": False,
+                "pr_title": "Safe change",
+                "pr_body": "Add a constant.",
+                "diff": "--- /dev/null\n+++ b/example.py\n@@ -0,0 +1 @@\n+x = 1\n",
+                "files": {"example.py": "x = 1\n"},
+            }) + "\n")
             output = root / "results.jsonl"
             cmd = [
                 sys.executable,

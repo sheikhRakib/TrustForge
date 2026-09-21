@@ -8,10 +8,7 @@
 #SBATCH --mem=32G
 #SBATCH --time=12:00:00
 #SBATCH --qos=train
-#
-# Submit:
-#   sbatch run.slurm
-#   sbatch --export=ALL,EXTRA_ARGS="--cwe cwe89 --limit 20" run.slurm
+
 
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR:-.}"
@@ -22,7 +19,7 @@ export PYTHONUNBUFFERED=1
 source "${TRUSTFORGE_CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
 conda activate trustforge
 
-# Positional arguments preserve spaces safely; legacy EXTRA_ARGS supports simple words.
-read -r -a extra_args <<< "${EXTRA_ARGS:-}"
-python -u main.py "${extra_args[@]}" "$@"
+python -u main.py \
+  --cwe cwe78 --cwe cwe79 --cwe cwe89 --cwe cwe94 \
+  --output output/evaluation.jsonl
 echo "Job finished at $(date)"
