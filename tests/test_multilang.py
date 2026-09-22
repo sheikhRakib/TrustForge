@@ -3,7 +3,7 @@
 import unittest
 
 from analysis import ProgramAnalyzer
-from multilang import analyze_file
+from semantic import SemanticAnalyzer, analyze_file
 
 
 class MultilangTests(unittest.TestCase):
@@ -60,6 +60,14 @@ class MultilangTests(unittest.TestCase):
         paths = {f.path for f in report.findings}
         self.assertIn("a.py", paths)
         self.assertIn("b.js", paths)
+
+    def test_unified_semantic_entry_point_handles_both(self):
+        findings, _ = SemanticAnalyzer({
+            "a.py": "eval(input())\n",
+            "b.php": "<?php eval($_GET['x']);\n",
+        }).run()
+        self.assertEqual({f["path"] for f in findings if f["kind"] == "taint"},
+                         {"a.py", "b.php"})
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ LANGUAGES = {
     ".kt": "kotlin",
     ".scala": "scala",
 }
+MAX_ANALYSIS_SOURCE_BYTES = 500_000
 
 
 def strip_source(

@@ -115,6 +115,87 @@ def write_attack_type_figure(rows, output_dir, *, complete):
     return True
 
 
+def write_payload_type_figure(rows, output_dir, *, complete):
+    """Compare baseline and hybrid on the same labeled SEVRA-derived payloads."""
+    variants = (
+        "authority_note", "role_hijack", "base64_instruction",
+        "homoglyph_instruction", "cross_file_instruction",
+    )
+    selected = [
+        row for row in rows
+        if row["malicious"] and row.get("source") == "sevra_variant"
+        and row.get("variant") in variants
+        and row["mode"] in ("baseline", "hybrid")
+    ]
+    if not selected:
+        return False
+    by_mode = {
+        mode: {(row["id"], row.get("parent_id"), row["variant"]): row
+               for row in selected if row["mode"] == mode}
+        for mode in ("baseline", "hybrid")
+    }
+    if not by_mode["baseline"] or by_mode["baseline"].keys() != by_mode["hybrid"].keys():
+        return False
+    parent_sets = [
+        {key[1] for key in by_mode["baseline"] if key[2] == variant}
+        for variant in variants
+    ]
+    if not parent_sets[0] or None in parent_sets[0] or any(
+        parents != parent_sets[0] for parents in parent_sets[1:]
+    ):
+        return False
+    summary = []
+    for variant in variants:
+        matching = [key for key in by_mode["baseline"] if key[2] == variant]
+        if not matching:
+            continue
+        entry = {"payload_type": variant, "parent_prs": len({key[1] for key in matching})}
+        for mode in ("baseline", "hybrid"):
+            approved = sum(by_mode[mode][key]["verdict"] == "APPROVE" for key in matching)
+            entry.update({f"{mode}_malicious_n": len(matching),
+                          f"{mode}_approved": approved,
+                          f"{mode}_asr": approved / len(matching)})
+        summary.append(entry)
+    if not summary:
+        return False
+    stem = output_dir / "payload-type-asr"
+    with stem.with_suffix(".csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(summary[0]))
+        writer.writeheader()
+        writer.writerows(summary)
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(5.2, 2.6))
+    for offset, mode, color, marker in (
+        (-0.13, "baseline", "#c15d27", "s"),
+        (0.13, "hybrid", "#176b9a", "o"),
+    ):
+        ax.scatter([100 * row[f"{mode}_asr"] for row in summary],
+                   [i + offset for i in range(len(summary))],
+                   label=mode.replace("_", " ").title(), color=color,
+                   marker=marker, s=35, zorder=3)
+    ax.set_yticks(range(len(summary)),
+                  [row["payload_type"].replace("_", " ") for row in summary])
+    ax.invert_yaxis()
+    ax.set_xlim(0, 100)
+    ax.set_xticks(range(0, 101, 20), [f"{n}%" for n in range(0, 101, 20)])
+    ax.set_xlabel("Attack success rate (malicious PR approved)")
+    ax.grid(axis="x", alpha=0.25)
+    ax.set_axisbelow(True)
+    ax.legend(frameon=False, ncol=2, loc="lower center", bbox_to_anchor=(0.5, 1.01))
+    note = "Instruction payload variants; sample counts in CSV"
+    if not complete:
+        note += "; partial results"
+    fig.text(0.5, 0.01, note, ha="center", fontsize=7)
+    fig.subplots_adjust(left=0.35, right=0.97, top=0.88, bottom=0.20)
+    fig.savefig(stem.with_suffix(".png"), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return True
+
+
 def load_results(path, *, allow_partial=False):
     rows = list(iter_jsonl(path))
     keys = [(r["id"], r["malicious"], r["mode"]) for r in rows]
@@ -186,6 +267,9 @@ def main():
     attack_figure = write_attack_type_figure(rows, a.output_dir, complete=complete)
     if attack_figure:
         print(f"Wrote attack-type ASR figure and CSV to {a.output_dir}")
+    payload_figure = write_payload_type_figure(rows, a.output_dir, complete=complete)
+    if payload_figure:
+        print(f"Wrote payload-type ASR figure and CSV to {a.output_dir}")
     print(f"Wrote metrics.csv and report status to {a.output_dir}")
 
 
