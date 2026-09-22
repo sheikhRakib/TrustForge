@@ -51,14 +51,17 @@ class AblationContractTests(unittest.TestCase):
         self.assertFalse(any(f["kind"] in {"taint", "symbolic"} for f in findings))
         self.assertTrue(any(f["kind"] == "sink" for f in findings))
 
-    def test_javascript_uses_bounded_ast_flow(self):
+    def test_non_python_semantics_use_multilang_heuristics(self):
         report = ProgramAnalyzer().analyze(
             {"x.js": "const x = req.body; eval(x);\n"}
         )
         self.assertTrue(any(f.kind == "sink" for f in report.findings))
         self.assertTrue(any(f.kind == "taint" for f in report.findings))
         self.assertTrue(
-            any("bounded AST flow" in w for w in report.warnings)
+            any("multilingual sink/taint heuristics" in w for w in report.warnings)
+        )
+        self.assertTrue(
+            any("Python-only" in w for w in report.warnings)
         )
 
     def test_non_python_taint_ablation_keeps_sink_inventory(self):

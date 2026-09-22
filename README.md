@@ -98,38 +98,8 @@ mode to contain the same examples. For diagnostic reports with uneven observed
 modes, add `--allow-partial`; their figures are labeled partial/unverified. The
 report cannot infer whether an entirely absent mode or record was expected.
 
-To create a separate, labeled instruction-payload benchmark from the four local
-CWE groups, run:
-
-```bash
-python variants.py --output output/payload-variants-four-cwe.jsonl
-# Check a tiny sample first without loading the model:
-python main.py --benchmark output/payload-variants-four-cwe.jsonl --limit 2 --dry-run
-# On a GPU allocation, use a new result path and evaluate the same examples in both modes:
-python main.py --benchmark output/payload-variants-four-cwe.jsonl \
-  --modes baseline,hybrid --output output/payload-variant-evaluation.jsonl
-python report.py output/payload-variant-evaluation.jsonl \
-  --output-dir output/payload-variant-report
-```
-
-The generator retains each original malicious PR and benign control, then adds
-five variants for each malicious PR: authority note, role hijack, Base64-encoded
-instruction, Unicode homoglyph instruction, and instruction text split across
-two new documentation files. Each variant records its parent ID and leaves the
-original executable files and diff unchanged. It verifies the added-file diffs
-against the supplied head contents. `report.py` writes `payload-type-asr.csv`
-and a baseline-versus-hybrid PNG when both modes have matching variant records.
-These are **reviewer-instruction attacks**. The cross-file variant does not move
-program logic across files, and none of these records establishes the paper's
-claimed code-obfuscation experiment. Do not describe this chart as ASR for
-cross-file logic or obfuscated executable code. A full benchmark/model run is
-needed before reporting rates.
-
 ## What is implemented
 
-- `analysis.py` invokes one `SemanticAnalyzer` in `semantic.py` for all source
-  languages. Its internal parsers and transfer rules remain language-specific,
-  including the bounded JavaScript/TypeScript/PHP flow interpreter.
 - Scanner triage prioritizes files; the injection detector flags reviewer
   manipulation. These are separate model calls using the same weights.
 - The auditor receives changed diff hunks and numbered, syntax-stripped
@@ -146,12 +116,6 @@ needed before reporting rates.
 - Grounding validates the exact file, original line number, and nonempty quoted
   source excerpt, including whether it was visible in the auditor call. It
   checks evidence existence, not the correctness of the model's reasoning.
-- Auditor concerns receive one focused model reassessment against the same patch
-  and visible source. It can clear an unsupported concern, retain a specific
-  uncertainty, or confirm a defect. Failed reassessments retain the original
-  result; those exceeding the input budget are skipped. A citation without an
-  explanation is UNKNOWN unless reassessment supplies a valid review. This is
-  another model judgment, not a proof of correctness.
 - Python analysis propagates taint through assignments, supported expressions,
   and resolved local function calls. SQL taint checks distinguish the query from
   bound parameters. Imported Flask request aliases are recognized; standalone
@@ -165,18 +129,11 @@ needed before reporting rates.
   functions, loops, dynamic dispatch, complex objects, and unsupported expressions
   are reported as coverage limits.
   Witnesses describe a modeled reachable sink, not proof of exploitability.
-- JavaScript/TypeScript and PHP use a bounded AST flow interpreter for local
-  assignments, direct calls, simple equality branches, and selected local
-  imports/includes. Modeled source-to-sink paths produce taint findings; Z3
-  can produce a concrete string input for supported paths. Recognized sinks
-  include code/shell execution, SQL query calls, and selected HTML output APIs.
-  Cross-file findings
-  require the target file to be supplied. Loops, dynamic calls, complex objects,
-  and sources over 500 KB are outside this interpreter's coverage and are reported.
-- C/C++, Go, Java, Ruby, and Rust retain tree-sitter sink/taint proximity
-  heuristics. Known dangerous calls are inventoried, and advisory taint findings
-  may fire when a source and sink co-occur in a function or a high-risk sink
-  appears. These are not traced flows or symbolic proofs.
+- Multilingual sink/taint heuristics (tree-sitter) cover PHP, JavaScript/TypeScript,
+  C/C++, Go, Java, Ruby, and Rust: known dangerous calls are inventoried, and
+  advisory ``taint`` findings fire when a known source and sink co-occur in the
+  same function or when a high-risk sink (eval/system/exec-style) appears.
+  These are heuristics, not symbolic proofs.
 - Multilingual diff rules identify potential changes to sinks and protection
   code. Syntax comments and literal text are masked before matching; executable
   string interpolation is retained. SQL diff rules inspect API argument
@@ -190,20 +147,14 @@ needed before reporting rates.
   A separate final model review considers their bounded signals, the multi-agent
   verdict, and the PR diff before making its own verdict; it does not copy the
   multi-agent verdict.
-  Concise auditor explanations, analysis details, and nearby source excerpts
-  accompany each final-review chunk as untrusted user content. Excerpts are
-  shortened or omitted when necessary to fit the input budget.
   Component signals are advisory, so the final reviewer can approve a fix that
   the auditor flagged or reject a defect the auditor missed.
 
-There is no claim of complete, injection-immune verification. Python has the
-deepest symbolic and import-aware analysis; JavaScript/TypeScript and PHP have
-the limited subset above, while other languages use heuristics. Parser errors,
-unmodeled control flow, and source-size limits are exposed in diagnostics.
-Imported modules absent from the supplied context cannot be resolved. The
-current four-CWE enriched records contain no unchanged `repository_files`, so
-cross-file resolution is limited to changed files included in each PR. Coverage
-warnings are diagnostic: they do
+There is no claim of complete, injection-immune verification: full symbolic and
+import-aware analysis remains Python-specific; other supported languages use
+sink/taint heuristics plus syntax stripping and diff rules. Parser errors and
+unsupported syntax are exposed in diagnostics. Imported modules absent from the
+supplied context cannot be resolved. Coverage warnings are diagnostic: they do
 not automatically override an auditor approval. `analysis_only` returns UNKNOWN
 when it has no advisory finding; absence of a finding is not treated as a
 clean-code proof.
@@ -233,7 +184,6 @@ When both modes run on the same PR, hybrid reuses the scanner, injection, and
 auditor calls, then adds its own final model calls. It can reach a different
 verdict from multi-agent.
 Small source files share auditor calls.
-Approved auditor chunks require no reassessment call; flagged chunks can add one.
 The Slurm log prints elapsed time and model-call count for each review. JSONL
 results omit per-call timing, token counts, GPU memory, and OOM retry details;
 OOM recovery still retries the complete review with a smaller input budget.
@@ -267,10 +217,9 @@ current 3B launchers.
 ./run_srun.sh --disable symbolic --output output/no-symbolic.jsonl
 ```
 
-The offline `variants.py` generator makes the five reviewer-instruction variants
-described above; it does not produce executable-code obfuscations or synthetic
-fixtures. Other existing benchmark JSONL files can also be evaluated through
-`main.py --benchmark`. Ablation names are `scanner`,
+This repository no longer generates narrative variants or synthetic fixtures.
+If you already have a benchmark JSONL containing them, `main.py --benchmark`
+can still evaluate it. Ablation names are `scanner`,
 `injection`, `stripping`, `grounding`, `taint`, `symbolic`, `cross_file`, and `diff`.
 `symbolic` disables constraint solving and witnesses while retaining taint;
 `taint` disables taint and its dependent symbolic witnesses while retaining the
