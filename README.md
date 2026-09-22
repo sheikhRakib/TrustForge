@@ -89,8 +89,11 @@ metrics; a low ASR alone does not establish useful review quality.
 python report.py output/full.jsonl --output-dir output/full-report
 ```
 
-This exports metrics CSV, report status, and SVG ASR figures by variant,
-separating SEVRA and synthetic fixtures. By default it requires every observed
+This exports metrics CSV and report status, separating SEVRA and synthetic
+fixtures in the metrics. For original SEVRA records with attack labels, it also
+exports `attack-type-asr.csv` and a baseline-versus-hybrid ASR chart as
+PNG. These are the dataset's narrative attack
+types, not Base64/homoglyph/cross-file obfuscation variants. By default it requires every observed
 mode to contain the same examples. For diagnostic reports with uneven observed
 modes, add `--allow-partial`; their figures are labeled partial/unverified. The
 report cannot infer whether an entirely absent mode or record was expected.

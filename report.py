@@ -1,14 +1,118 @@
-"""Export evaluation metrics and the paper's ASR-by-variant figure."""
+"""Export evaluation metrics and the SEVRA attack-type ASR chart."""
 
 import argparse
 import csv
 import json
-import re
 from pathlib import Path
 from main import is_slurm_log_path, summarize
 from dataset import iter_jsonl
 
 DEFAULT_REPORT_DIR = Path("output/report")
+
+
+def write_attack_type_figure(rows, output_dir, *, complete):
+    """Plot baseline and hybrid ASR by original SEVRA attack/framing label."""
+    selected = [
+        row for row in rows
+        if row["malicious"]
+        and row.get("source", "sevra") == "sevra"
+        and row.get("variant", "original") == "original"
+        and (row.get("attack") or row.get("framing"))
+        and row["mode"] in ("baseline", "hybrid")
+    ]
+    if {row["mode"] for row in selected} != {"baseline", "hybrid"}:
+        return False
+
+    labels = {}
+    counts = {}
+    for row in selected:
+        label = row.get("attack") or row["framing"]
+        key = (row["id"], row["malicious"])
+        if key in labels and labels[key] != label:
+            raise ValueError(f"Inconsistent attack type across modes for {row['id']}")
+        labels[key] = label
+        bucket = counts.setdefault((label, row["mode"]), [0, 0])
+        bucket[0] += 1
+        bucket[1] += row["verdict"] == "APPROVE"
+
+    modes = ("baseline", "hybrid")
+    rank_mode = "hybrid"
+    attack_types = sorted(
+        {label for label, _ in counts},
+        key=lambda label: (
+            counts.get((label, rank_mode), [0, 0])[1]
+            / max(1, counts.get((label, rank_mode), [0, 0])[0]),
+            label,
+        ),
+    )
+    summary = []
+    for label in attack_types:
+        entry = {"attack_type": label}
+        for mode in modes:
+            n, approved = counts.get((label, mode), [0, 0])
+            entry.update({
+                f"{mode}_malicious_n": n,
+                f"{mode}_approved": approved,
+                f"{mode}_asr": approved / n if n else "",
+            })
+        summary.append(entry)
+
+    stem = output_dir / "attack-type-asr"
+    with stem.with_suffix(".csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(summary[0]))
+        writer.writeheader()
+        writer.writerows(summary)
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(3.55, max(2.8, 0.31 * len(summary) + 0.5)))
+    styles = {
+        "baseline": ("#c15d27", "s", "Baseline"),
+        "hybrid": ("#176b9a", "o", "Hybrid"),
+    }
+    offsets = [0] if len(modes) == 1 else [
+        -0.15 + 0.30 * i / (len(modes) - 1) for i in range(len(modes))
+    ]
+    for index, mode in enumerate(modes):
+        color, marker, label = styles.get(mode, (f"C{index}", "D", mode))
+        points = [
+            (100 * counts[(row["attack_type"], mode)][1]
+             / counts[(row["attack_type"], mode)][0], i + offsets[index])
+            for i, row in enumerate(summary)
+            if (row["attack_type"], mode) in counts
+        ]
+        if points:
+            ax.scatter(*zip(*points), s=22, marker=marker, color=color,
+                       label=label, zorder=3)
+    ax.set_yticks(range(len(summary)),
+                  [row["attack_type"].replace("_", " ") for row in summary],
+                  fontsize=6.7)
+    ax.set_xlim(0, 105)
+    ax.set_xticks(range(0, 101, 20), [f"{value}%" for value in range(0, 101, 20)],
+                  fontsize=7)
+    ax.set_xlabel("Attack success rate", fontsize=7)
+    ax.invert_yaxis()
+    ax.grid(axis="x", color="#e4e7eb", lw=0.6)
+    ax.set_axisbelow(True)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    ax.spines["bottom"].set_color("#aab2bb")
+    ax.tick_params(axis="y", length=0)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.01), ncol=len(modes),
+              frameon=False, fontsize=6.4, handletextpad=0.2, columnspacing=0.7)
+    denominators = {n for n, _ in counts.values()}
+    count_note = (f"n={denominators.pop()} malicious PRs/type" if len(denominators) == 1
+                  else "sample counts in CSV")
+    fig.text(0.5, 0.012,
+             f"SEVRA attack labels; {count_note}; original variants"
+             + ("; partial results" if not complete else ""),
+             ha="center", fontsize=6.2, color="#59636e")
+    fig.subplots_adjust(left=0.47, right=0.97, top=0.94, bottom=0.10)
+    fig.savefig(stem.with_suffix(".png"), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return True
 
 
 def load_results(path, *, allow_partial=False):
@@ -79,52 +183,10 @@ def main():
         writer = csv.DictWriter(f, fieldnames=list(groups[0]))
         writer.writeheader()
         writer.writerows(groups)
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    for source in sorted({r["source"] for r in groups}):
-        data = [r for r in groups if r["source"] == source]
-        variants = sorted({r["variant"] for r in data})
-        modes = sorted({r["name"] for r in data})
-        fig, ax = plt.subplots(figsize=(max(6, len(variants) * 1.3), 4))
-        width = 0.8 / len(modes)
-        for j, mode in enumerate(modes):
-            for i, variant in enumerate(variants):
-                record = next(
-                    (r for r in data if r["name"] == mode and r["variant"] == variant),
-                    None,
-                )
-                if record and record["attack_success"] is not None:
-                    x = i - 0.4 + width / 2 + j * width
-                    ax.bar(
-                        x,
-                        100 * record["attack_success"],
-                        width,
-                        label=mode if i == 0 else None,
-                        color=f"C{j}",
-                    )
-                    ax.text(
-                        x,
-                        100 * record["attack_success"] + 1,
-                        f"n={record['malicious_n']}",
-                        ha="center",
-                        fontsize=7,
-                    )
-        ax.set_xticks(range(len(variants)), variants, rotation=25, ha="right")
-        ax.set_ylabel("Malicious approval rate (%)")
-        ax.set_ylim(0, 112)
-        ax.set_title(
-            f"Observed ASR by variant — {source}"
-            + ("" if complete else " (partial/unverified)")
-        )
-        ax.legend()
-        fig.tight_layout()
-        safe_source = re.sub(r"[^A-Za-z0-9_-]", "_", source)
-        fig.savefig(a.output_dir / f"asr_{safe_source}.svg")
-        plt.close(fig)
-    print(f"Wrote metrics.csv and ASR figure(s) to {a.output_dir}")
+    attack_figure = write_attack_type_figure(rows, a.output_dir, complete=complete)
+    if attack_figure:
+        print(f"Wrote attack-type ASR figure and CSV to {a.output_dir}")
+    print(f"Wrote metrics.csv and report status to {a.output_dir}")
 
 
 if __name__ == "__main__":
