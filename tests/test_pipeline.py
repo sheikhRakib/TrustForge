@@ -311,9 +311,11 @@ class InferenceTests(unittest.TestCase):
         self.assertIn("Scanner signals:", llm.hybrid_inputs[0][0])
         self.assertIn("Injection detector:", llm.hybrid_inputs[0][0])
         self.assertIn("Auditor signals: BLOCK", llm.hybrid_inputs[0][0])
+        self.assertIn("Multi-agent verdict: BLOCK", llm.hybrid_inputs[0][0])
         self.assertIn("diff_sink at x.py:1", llm.hybrid_inputs[0][0])
         self.assertIn("+escaped", llm.hybrid_inputs[0][1])
         self.assertIn('"multi_agent"', response)
+        self.assertIn('"multi_agent_verdict": "BLOCK"', response)
 
     def test_hybrid_alone_runs_all_components(self):
         class Fake:

@@ -302,6 +302,7 @@ class ReviewerAgent:
     def hybrid_review(self, example):
         """Use all review components, then decide independently from the diff."""
         multi = self.multi_agent_review(example)
+        multi_result = self.aggregate(multi, use_analysis=False)
         report = self.analyze_code(example)
         def safe_path(path):
             return re.sub(r"[^A-Za-z0-9_./-]", "_", str(path or ""))[:100]
@@ -353,6 +354,7 @@ class ReviewerAgent:
                 for verdict in ("BLOCK", "COMMENT", "UNKNOWN", "APPROVE")
             )
             + ")"
+            + "\nMulti-agent verdict: " + multi_result["verdict"]
             + "\nProgram-analysis signals: " + ("; ".join(signals) if signals else "none")
         )
         review_text = format_pr_for_review(example)
@@ -368,7 +370,8 @@ class ReviewerAgent:
             "APPROVE",
         )
         return verdict + "\n" + json.dumps(
-            {"verdict": verdict, "reviews": responses, "multi_agent": multi,
+            {"verdict": verdict, "reviews": responses,
+             "multi_agent_verdict": multi_result["verdict"], "multi_agent": multi,
              "analysis": report.to_dict()},
             ensure_ascii=False,
         )

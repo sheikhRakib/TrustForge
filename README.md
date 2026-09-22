@@ -141,8 +141,9 @@ report cannot infer whether an entirely absent mode or record was expected.
   approved code. Safe approvals do not require a nonexistent vulnerability
   citation. Missing head files (including deletion-only PRs) and malformed auditor decisions remain UNKNOWN.
 - Hybrid uses the scanner, injection detector, auditor, and program analysis.
-  A separate final model review considers their bounded signals alongside the
-  PR diff and makes its own verdict; it does not inherit the multi-agent verdict.
+  A separate final model review considers their bounded signals, the multi-agent
+  verdict, and the PR diff before making its own verdict; it does not copy the
+  multi-agent verdict.
   Component signals are advisory, so the final reviewer can approve a fix that
   the auditor flagged or reject a defect the auditor missed.
 
